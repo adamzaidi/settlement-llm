@@ -1,0 +1,7 @@
+﻿Column Name,Description,Type,Example,Unit
+case_id,Unique identifier for the case,int,11113534,N/A
+case_name,Name of the legal case or opinion,string,Ex Parte Michael Klein,N/A
+court,Court in which the case was decided,string,Tex. Crim. App.,N/A
+date_created,Date the opinion/metadata was created,datetime,2025-08-03T03:19:51.517202-07:00,ISO 8601 datetime
+citation,Legal citation associated with the case,string,706 S.W.3d 391,N/A
+outcome_code,temp numeric code representing case outcome,int,0,-1 to 1
