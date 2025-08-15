@@ -1,31 +1,36 @@
-# Python
+# Python cache/metadata
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 *.egg-info/
 .ipynb_checkpoints/
 
-# Virtualenv
+# Virtual environments
 .venv/
-env/
 venv/
+env/
 
 # OS cruft
 .DS_Store
 
-# Logs
+# Logs (keep the folder, ignore files)
 logs/
 !logs/.gitkeep
 
-# Data outputs & caches
+# Data outputs & caches (keep the folder structure, ignore generated files)
 data/extracted/_http_cache*
 data/extracted/raw_data*.csv
 data/processed/*.csv
 data/model-eval/*
 data/outputs/*
+!data/.gitkeep
+!data/extracted/.gitkeep
+!data/processed/.gitkeep
+!data/model-eval/.gitkeep
+!data/outputs/.gitkeep
 
-# Large binaries / misc
+# Images/reports (generated)
 *.png
 *.pdf
 *.zip
