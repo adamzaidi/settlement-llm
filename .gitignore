@@ -1,1 +1,31 @@
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.ipynb_checkpoints/
+
+# Virtualenv
+.venv/
+env/
+venv/
+
+# OS cruft
+.DS_Store
+
+# Logs
+logs/
+!logs/.gitkeep
+
+# Data outputs & caches
+data/extracted/_http_cache*
+data/extracted/raw_data*.csv
+data/processed/*.csv
+data/model-eval/*
+data/outputs/*
+
+# Large binaries / misc
+*.png
+*.pdf
+*.zip
