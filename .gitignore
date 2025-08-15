@@ -34,8 +34,7 @@ data/extracted/_http_cache*
 !data/model-eval/.gitkeep
 !data/outputs/.gitkeep
 !data/reference-tables/**
-# keep small config examples
-!.env.example
 
-# --- Local secrets (never commit real .env) ---
+# --- Local secrets ---
 .env
+!.env.example
