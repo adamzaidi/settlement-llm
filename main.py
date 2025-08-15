@@ -1,5 +1,5 @@
 # 1) Set up logging to see progress + errors.
-# 2) Runs the ETL pipeline: Extract -> Transform -> Load.
+# 2) Runs the ETL pipeline: Extract -> Transform -> Load. 
 # 3) Trains + evaluates models with coarse + fine labels.
 # 4) Save visualizations for the report.
 
