@@ -1,7 +1,29 @@
 ﻿Column Name,Description,Type,Example,Unit
-case_id,Unique identifier for the case,int,11113534,N/A
-case_name,Name of the legal case or opinion,string,Ex Parte Michael Klein,N/A
-court,Court in which the case was decided,string,Tex. Crim. App.,N/A
-date_created,Date the opinion/metadata was created,datetime,2025-08-03T03:19:51.517202-07:00,ISO 8601 datetime
-citation,Legal citation associated with the case,string,706 S.W.3d 391,N/A
-outcome_code,temp numeric code representing case outcome,int,0,-1 to 1
+case_id,int,Opinion ID from CourtListener.,1234567,opinions API
+date_created,datetime (ISO str),Opinion creation date (as returned by API).,2020-05-12T14:33:21Z,opinions API
+date_modified,datetime (ISO str),Last modified timestamp (API).,2020-05-13T09:10:42Z,opinions API
+opinion_year,int or null,Year parsed from date_created.,2020,derived
+page_count,int or null,Pages (if provided by API).,12,opinions API
+per_curiam,bool,Whether opinion is per curiam.,TRUE,opinions API
+type,str,Opinion type string from API.,010combined,opinions API
+author_id,int or null,Author judge ID (if any).,987,opinions API
+joined_by_count,int,Number of judges joining.,2,opinions API/derived
+case_name,str,Case caption/name (cluster fields preferred).,ACME v. Smith,cluster
+citation,str,Best-effort single citation (official preferred).,123 F.3d 456,cluster/opinion
+court,str,Normalized court name (abbrev expanded if federal).,U.S. District Court for the Southern District of New York,court link + normalization
+jurisdiction_state,str,State/federal tag inferred from court.,New York,derived
+text_char_count,int,Character count of opinion text (0 in FAST mode).,25430,derived
+text_word_count,int,Word count of opinion text (0 in FAST mode).,4803,derived
+label_heuristic,str,Simple text-based label (affirmed/reversed/etc.).,affirmed,derived
+plain_text_present,int (0/1),1 if plain_text field is non-empty.,1,derived
+plain_text_url,str,URL to raw opinion text (if provided).,https://...,opinions API
+download_url,str,URL to opinion PDF/text download.,https://…,opinions API
+cluster_url,str,Link to cluster resource for the opinion.,https://…,opinions API
+court_url,str,Link to the court resource (normalized).,https://…,court link
+has_citation,int (0/1),Convenience flag: citation known.,1,derived
+has_court,int (0/1),Convenience flag: court known.,1,derived
+is_per_curiam,int (0/1),Convenience flag: per curiam.,0,derived
+outcome_code,int,Temporary placeholder for downstream modeling (overwritten/augmented in Transform).,0,placeholder
+outcome_label_fine,str,Fine label name: Win/Loss/Mixed/Partial/Settlement/Other.,Win,transform
+outcome_code_fine,int,Fine label code (see codebook).,1,transform
+court_limited,str,"Court aggregated to ""Top N + Other"" for charts.",Other,visualization prep

@@ -1,10 +1,16 @@
+#Loads the processed CSV into a DataFrame for modeling/visualization.
+import logging
+logger = logging.getLogger("pipeline")
+
 import pandas as pd
 
-def load_data():
+PROCESSED_PATH = "data/processed/processed_data.csv"
+
+def load_data(path: str = PROCESSED_PATH) -> pd.DataFrame:
     """
-    Loads processed data from data/processed for analysis.
+    Read processed CSV. Raises if missing.
     """
-    processed_path = "data/processed/processed_data.csv"
-    df = pd.read_csv(processed_path)
-    print("Loaded processed data for analysis.")
+    logger.info("Entering load_data")
+    df = pd.read_csv(path)
+    logger.info("Loaded processed data for analysis")
     return df
