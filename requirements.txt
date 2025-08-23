@@ -1,6 +1,7 @@
 beautifulsoup4==4.12.2
 bokeh==3.7.3
 bokeh_sampledata==2025.0
+Bottleneck==1.5.0
 branca==0.8.1
 certifi==2023.7.22
 charset-normalizer==3.2.0

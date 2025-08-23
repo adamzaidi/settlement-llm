@@ -1,11 +1,14 @@
-# 1) Produces charts for the report/presentation:
-#  - Outcome distribution (counts + percents)
-#  - Top outcomes overall (barh)
-#  - Cases by court & outcome (stacked barh, Top N + Other)
-#  - Courts Pareto (bars + cumulative % line)
-#  - Opinions over time
-#  - Word count histogram + boxplot by outcome
+# -----------------------------------------------------------------------------
+# What this file does
+# 1) Produce easy-to-read charts (PNG) for the report:
+#    - Outcome distribution (counts + percents)
+#    - Top outcomes overall (barh)
+#    - Cases by court & outcome (stacked barh, Top N + Other)
+#    - Courts Pareto (bars + cumulative % line)
+#    - Opinions over time
+#    - Word count histogram + boxplot by outcome
 # 2) Save everything to data/outputs/
+# -----------------------------------------------------------------------------
 
 import os
 import logging
@@ -17,16 +20,19 @@ logger = logging.getLogger("pipeline")
 
 OUTDIR = "data/outputs"
 
-# Outcome code -> label
+# Outcome code -> label mapping
 OUTCOME_LABELS = {0: "Loss", 1: "Win", 2: "Settlement"}
 OUTCOME_ORDER = [0, 1, 2]  # display order for stacked bars
 
-# Small helpers
+
+# small helpers
 def _ensure_outdir():
+    """Make sure the output directory exists before saving figures."""
     os.makedirs(OUTDIR, exist_ok=True)
 
+
 def _finish_fig(path: str):
-    """Tight layout → save → close (avoid memory leaks)."""
+    """Finish a figure: tighten layout, save to disk, and close it to free memory."""
     try:
         plt.tight_layout()
         try:
@@ -37,8 +43,12 @@ def _finish_fig(path: str):
     finally:
         plt.close()
 
+
 def _labelify(values):
-    """Map codes to labels (returns simple list of strings)."""
+    """
+    Map numeric codes to human-readable outcome labels.
+    If I see something unexpected, I just return it as a string.
+    """
     out = []
     for v in list(values):
         try:
@@ -48,9 +58,10 @@ def _labelify(values):
             out.append(OUTCOME_LABELS.get(v, str(v)))
     return out
 
+
 def _aggregate_top_n(series: pd.Series, top_n: int = 15, other_label: str = "Other") -> pd.Series:
     """
-    Keep only top_n categories; bundle the rest into an 'Other' bucket.
+    Reduce a long tail of categories into an 'Other' bucket so plots stay readable.
     """
     counts = series.value_counts()
     if len(counts) <= top_n:
@@ -59,20 +70,25 @@ def _aggregate_top_n(series: pd.Series, top_n: int = 15, other_label: str = "Oth
     tail_sum = counts.iloc[top_n:].sum()
     return pd.concat([top, pd.Series({other_label: tail_sum})])
 
+
 def _barh_from_counts(counts: pd.Series, title: str, xlabel: str, ylabel: str, outname: str, figsize=(10, 6)):
-    """Horizontal bar chart helper."""
+    """Quick helper to make a horizontal bar chart from a Series of counts."""
     fig, ax = plt.subplots(figsize=figsize)
     ax.barh(range(len(counts)), counts.values)
     ax.set_yticks(range(len(counts)))
     ax.set_yticklabels(counts.index)
-    ax.invert_yaxis()  # biggest on top
+    ax.invert_yaxis()  # biggest bar on top
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     _finish_fig(os.path.join(OUTDIR, outname))
 
-# Charts
+
+# charts
 def outcome_distribution(df: pd.DataFrame):
+    """
+    Show how outcomes are distributed (counts + percents above bars).
+    """
     if "outcome_code" not in df.columns:
         logger.warning("Outcome distribution: 'outcome_code' not found; skipping.")
         return
@@ -94,7 +110,11 @@ def outcome_distribution(df: pd.DataFrame):
                     ha="center", va="bottom", fontsize=9)
     _finish_fig(os.path.join(OUTDIR, "outcome_distribution.png"))
 
+
 def top_outcomes_overall(df: pd.DataFrame):
+    """
+    Horizontal bar chart of the most common outcomes overall.
+    """
     if "outcome_code" not in df.columns:
         logger.warning("Top outcomes: 'outcome_code' not found; skipping.")
         return
@@ -108,9 +128,11 @@ def top_outcomes_overall(df: pd.DataFrame):
         figsize=(8, 4.5),
     )
 
+
 def cases_by_court_stacked(df: pd.DataFrame, top_n: int = 12):
     """
-    Stacked horizontal bars: Top X courts + 'Other', split by outcome.
+    Show cases by court as stacked bars, split by outcome.
+    Only the top_n courts are shown explicitly; everything else goes into "Other".
     """
     if "court" not in df.columns or "outcome_code" not in df.columns:
         logger.warning("Stacked by court: missing 'court' or 'outcome_code'; skipping.")
@@ -151,9 +173,10 @@ def cases_by_court_stacked(df: pd.DataFrame, top_n: int = 12):
     ax.legend(title="Outcome", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
     _finish_fig(os.path.join(OUTDIR, "cases_by_court_stacked.png"))
 
+
 def courts_pareto(df: pd.DataFrame, top_n: int = 20):
     """
-    Pareto chart: sorted court counts + cumulative % line.
+    Pareto chart: courts ranked by volume (bars) with a cumulative % line.
     """
     if "court" not in df.columns:
         logger.warning("Courts Pareto: 'court' not found; skipping.")
@@ -195,7 +218,11 @@ def courts_pareto(df: pd.DataFrame, top_n: int = 20):
 
     _finish_fig(os.path.join(OUTDIR, "courts_pareto.png"))
 
+
 def opinions_over_time(df: pd.DataFrame):
+    """
+    Simple line plot of how many opinions appear per year.
+    """
     if "opinion_year" not in df.columns:
         logger.warning("Opinions over time: 'opinion_year' not found; skipping.")
         return
@@ -211,7 +238,11 @@ def opinions_over_time(df: pd.DataFrame):
     ax.set_ylabel("Count")
     _finish_fig(os.path.join(OUTDIR, "opinions_over_time.png"))
 
+
 def text_wordcount_hist(df: pd.DataFrame, max_bin: int = 5000):
+    """
+    Histogram of opinion word counts, clipped at max_bin to avoid skew.
+    """
     if "text_word_count" not in df.columns:
         logger.warning("Word count hist: 'text_word_count' not found; skipping.")
         return
@@ -227,7 +258,12 @@ def text_wordcount_hist(df: pd.DataFrame, max_bin: int = 5000):
     ax.set_ylabel("Frequency")
     _finish_fig(os.path.join(OUTDIR, "text_wordcount_hist.png"))
 
+
 def wordcount_by_outcome_box(df: pd.DataFrame, max_cap: int = 10000):
+    """
+    Boxplot of opinion word counts grouped by outcome.
+    I clip extreme values so the boxes stay readable.
+    """
     if "text_word_count" not in df.columns or "outcome_code" not in df.columns:
         logger.warning("Wordcount by outcome: missing columns; skipping.")
         return
@@ -247,9 +283,10 @@ def wordcount_by_outcome_box(df: pd.DataFrame, max_cap: int = 10000):
     ax.set_ylabel("Word Count")
     _finish_fig(os.path.join(OUTDIR, "wordcount_by_outcome_box.png"))
 
+
 def generate_visualizations(df: pd.DataFrame):
     """
-    Runs all charts and save to data/outputs/.
+    Run all chart functions and save PNGs to the outputs folder.
     """
     _ensure_outdir()
     try:

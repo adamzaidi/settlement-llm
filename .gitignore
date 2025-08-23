@@ -1,40 +1,57 @@
-# --- Python / build ---
+# -----------------------------------------------------------------------------
+# Python / Jupyter
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 *.so
 *.egg-info/
-.pytest_cache/
-.ipynb_checkpoints/
-
-# --- OS / editor ---
-.DS_Store
-.vscode/
-.idea/
-
-# --- Virtual environments ---
+*.egg
+*.pkl
+*.ipynb_checkpoints/
+.env
 .venv/
 venv/
+ENV/
 env/
 
-# --- Logs (keep placeholder) ---
-logs/*
-!logs/.gitkeep
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+logs/
+*.log
 
-# --- Data artifacts (keep placeholders & reference tables) ---
+# -----------------------------------------------------------------------------
+# Data (only keep reference tables, drop extracted/processed/intermediate)
+# -----------------------------------------------------------------------------
 data/extracted/*
 data/processed/*
-data/model-eval/*
 data/outputs/*
-data/*.csv
-data/*_cache*
-data/extracted/_http_cache*
-!data/.gitkeep
-!data/extracted/.gitkeep
-!data/processed/.gitkeep
-!data/model-eval/.gitkeep
-!data/outputs/.gitkeep
+data/model-eval/*
+
+# Keep reference-tables (dictionary, schemas, constants)
 !data/reference-tables/**
 
-# --- Local secrets ---
-.env
-!.env.example
+# -----------------------------------------------------------------------------
+# OS / IDE junk
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# -----------------------------------------------------------------------------
+# CSV/Excel intermediate files
+# -----------------------------------------------------------------------------
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.ods
+
+# -----------------------------------------------------------------------------
+# Project-specific cache
+# -----------------------------------------------------------------------------
+cache/

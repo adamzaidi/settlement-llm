@@ -1,36 +1,47 @@
-# Returns logger so other files can use it
 from pathlib import Path
 import logging
 
-def setup_logger(name: str = "pipeline", log_path: str = "logs/pipeline.log", level: int = logging.INFO) -> logging.Logger:
+def setup_logger(
+    name: str = "pipeline",
+    log_path: str = "logs/pipeline.log",
+    level: int = logging.INFO
+) -> logging.Logger:
     """
-    Sets up a logger so we can see messages while the program runs
-    AND save them to a file for later.
+    Set up logging so I can see messages while the program runs
+    and also keep a log file for later.
+
+    Args:
+        name: the logger name (default "pipeline")
+        log_path: path for the log file
+        level: logging level (INFO, DEBUG, etc.)
+
+    Returns:
+        A configured logger instance that writes to both console and file.
     """
 
-    # 1) Make sure a "logs" folder exists to store the log file
+    # Make sure the logs directory exists
     Path("logs").mkdir(exist_ok=True)
 
-    # 2) Create a logger object with the given name (default is "pipeline")
+    # Create or get the logger object
     logger = logging.getLogger(name)
-    logger.setLevel(level)  # Set how much detail to show (INFO, DEBUG, etc.)
+    logger.setLevel(level)
 
-    # 3) Remove old handlers so logs don't repeat if we run the script again
+    # Remove old handlers so I don’t get duplicate log lines on re-run
     for h in list(logger.handlers):
         logger.removeHandler(h)
 
-    # 4) Create a file handler (writes logs to a file)
+    # File handler: writes to disk
     file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
 
-    # 5) Create a stream handler (shows logs in the console)
+    # Console handler: shows messages in stdout/stderr
     stream_handler = logging.StreamHandler()
 
-    # 6) Choose how the log messages will look
+    # Formatter controls how each log line looks
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
     file_handler.setFormatter(fmt)
     stream_handler.setFormatter(fmt)
 
-    # 7) Add both handlers (file + console) to our logger
+    # Attach both handlers
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
 
