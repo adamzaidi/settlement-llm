@@ -1,7 +1,6 @@
 # Final Project — INST414  
 **Author:** Adam Zaidi  
 **Date:** August 2025  
-**Repo URL:** *[Insert your GitHub repo link here]*  
 
 ---
 
