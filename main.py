@@ -8,6 +8,16 @@
 
 import os
 import logging
+from utils.run_context import init_run_context, configure_run_logging
+
+ctx = init_run_context()
+configure_run_logging(ctx)
+
+params = {
+    "run_id": ctx.run_id,
+    # add your real config values here (seed, split, model choices, etc.)
+}
+ctx.save_json("params.json", params)
 
 # Optional centralized setup (use if present), else fall back to inline config
 try:

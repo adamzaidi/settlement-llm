@@ -31,7 +31,7 @@ CACHE_FILE = "data/extracted/http_cache.db"  # shelve DB (single file)
 
 # Diagnostics / guardrails
 SKIP_HOPS = False               # True -> skip court lookups entirely
-INCLUDE_DOCKET_HOP = False      # False -> skip docket lookups (faster)
+INCLUDE_DOCKET_HOP = True      # False -> skip docket lookups (faster)
 SLOW_OP_THRESHOLD_SEC = 5.0     # log an opinion if processing takes longer
 
 # Optional .env
@@ -330,8 +330,12 @@ def extract_data(
                 t_op = time.time()
 
                 if debug_print_one and not printed_debug:
-                    logger.debug("First opinion payload:\n%s", json.dumps(op, indent=2))
+                    print("\n=== DEBUG: first opinion payload ===")
+                    print("keys:", sorted(list(op.keys())))
+                    print(json.dumps(op, indent=2)[:3000])  # truncate so it doesn't spam
+                    print("=== END DEBUG ===\n")
                     printed_debug = True
+                    return pd.DataFrame()  # stop early; avoids writing files
 
                 if len(rows) >= max_cases:
                     break
@@ -371,10 +375,16 @@ def extract_data(
                 case_name = (cluster.get("caseName") or cluster.get("case_name") or cluster.get("caption") or
                              op.get("case_name","") or "")
 
-                cluster_citations = cluster.get("citations", None)
+                # CourtListener v4 commonly uses "citation" (singular) on clusters.
+                # Some older/alt payloads may use "citations", so we support both.
+                cluster_citations = cluster.get("citation", None)
+                if cluster_citations is None:
+                    cluster_citations = cluster.get("citations", None)
+
                 all_citations = cluster_citations if cluster_citations is not None else opinion_cites
-                citation = _pick_citation(all_citations)
-                has_citation = int(bool(citation and citation != "Unknown"))
+                
+                citation = _pick_citation(all_citations) or "Unknown"
+                has_citation = int(citation != "Unknown")
 
                 # Court resolution
                 court_name = ""
@@ -383,7 +393,7 @@ def extract_data(
                 if not SKIP_HOPS:
                     # A) cluster -> court (fastest)
                     if not court_name:
-                        clu_court = cluster.get("court") or op.get("court") or ""
+                        clu_court = (cluster.get("court") or cluster.get("court_id") or op.get("court") or op.get("court_id") or "")
                         if isinstance(clu_court, (str, int)) and str(clu_court).strip():
                             court_api = _normalize_api_url(clu_court, "courts")
                             ccu = _normalize_url(court_api)
@@ -400,7 +410,7 @@ def extract_data(
 
                     # B) (optional) docket hop
                     if INCLUDE_DOCKET_HOP and not court_name:
-                        docket_val = (cluster.get("docket") or op.get("docket") or "")
+                        docket_val = (cluster.get("docket") or cluster.get("docket_id") or op.get("docket") or op.get("docket_id") or "")
                         if isinstance(docket_val, (str, int)) and str(docket_val).strip():
                             dcu = _normalize_api_url(docket_val, "dockets")
                             docket = docket_cache.get(dcu) or _cached_get_json(dcu)
@@ -502,5 +512,4 @@ def extract_data(
 
 # Manual test
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     extract_data(query="corporation", max_cases=200, fast_mode=True, page_size=100)

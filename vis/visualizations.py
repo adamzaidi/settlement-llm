@@ -118,7 +118,18 @@ def top_outcomes_overall(df: pd.DataFrame):
     if "outcome_code" not in df.columns:
         logger.warning("Top outcomes: 'outcome_code' not found; skipping.")
         return
-    counts = df["outcome_code"].map(lambda x: OUTCOME_LABELS.get(int(x), str(x))).value_counts()
+    
+    #prevents int (NaN) and makes missingness visible (good practice)
+    def _label_outcome(x):
+        if pd.isna(x):
+            return "Unknown"
+        try:
+            return OUTCOME_LABELS.get(int(x), str(x))
+        except Exception:
+            return "Unknown"
+
+    counts = df["outcome_code"].map(_label_outcome).value_counts()
+
     _barh_from_counts(
         counts=counts.sort_values(ascending=True),
         title="Top Outcomes Overall",
@@ -303,3 +314,4 @@ def generate_visualizations(df: pd.DataFrame):
     except Exception as e:
         logger.exception("Visualization step failed: %s", e)
         print("Visualization step failed:", e)
+        raise
