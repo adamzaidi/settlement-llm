@@ -4,6 +4,11 @@
 # 2) Pull useful fields (case name, court, citation, links).
 # 3) Optionally grab a plain-text URL for later processing.
 # 4) Write a CSV to data/extracted/raw_data.csv (+ periodic partial CSVs).
+#
+# IMPORTANT COURTLISTENER COMPLIANCE NOTES
+# - Do keyword searching ONLY via /search/ using the "q" parameter.
+# - Do NOT pass invalid params like "search" or "id__in" to /opinions/.
+# - This script enforces a hard max_cases row limit AND an optional hard page cap.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -24,30 +29,46 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # CONFIG
-DEFAULT_FAST_MODE = True                 # fast by default: fewer text ops
-API_URL = "https://www.courtlistener.com/api/rest/v4/opinions/"
+DEFAULT_FAST_MODE = False                 # fast by default: fewer text ops
+
+# --- CourtListener endpoints ---
+# IMPORTANT: "search" is NOT a valid filter parameter on /opinions/.
+# Keyword searching must be done via /search/ using the "q" parameter.
+SEARCH_URL = "https://www.courtlistener.com/api/rest/v4/search/"
+OPINION_DETAIL_URL = "https://www.courtlistener.com/api/rest/v4/opinions/{id}/"
+
 CHECKPOINT_EVERY = 200                   # write partial CSV every N rows
 CACHE_FILE = "data/extracted/http_cache.db"  # shelve DB (single file)
 
-# Diagnostics / guardrails
-SKIP_HOPS = False               # True -> skip court lookups entirely
-INCLUDE_DOCKET_HOP = True      # False -> skip docket lookups (faster)
-SLOW_OP_THRESHOLD_SEC = 5.0     # log an opinion if processing takes longer
-
-# Optional .env
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
+# NEW: snippet controls (keeps CSV reasonable, enables transform labeling)
+TEXT_SNIPPET_CHARS = int(os.getenv("TEXT_SNIPPET_CHARS", "12000"))
+SNIPPET_FETCH_SLEEP = float(os.getenv("SNIPPET_FETCH_SLEEP", "0.10"))
+SNIPPET_FETCH_MAX = int(os.getenv("SNIPPET_FETCH_MAX", "450"))  # guardrail
+
+# Diagnostics / guardrails
+SKIP_HOPS = False               # True -> skip court lookups entirely
+INCLUDE_DOCKET_HOP = True       # False -> skip docket lookups (faster)
+SLOW_OP_THRESHOLD_SEC = 5.0     # log an opinion if processing takes longer
+
+# Optional: hard cap on number of /search/ pages to pull (safety valve)
+# Set to None to disable page cap.
+MAX_SEARCH_PAGES = int(os.getenv("MAX_SEARCH_PAGES", "0")) or None  # e.g., "30" to cap at 30 pages
+
 API_KEY = os.getenv("COURTLISTENER_API_KEY")
 EMAIL   = os.getenv("COURTLISTENER_EMAIL")
 
 OUTPUT_COLUMNS = [
+    "opinion_id", "opinion_api_url",   # NEW (entity resolution anchor)
     "case_id","date_created","date_modified","opinion_year","page_count","per_curiam","type",
     "author_id","joined_by_count","case_name","citation","court","jurisdiction_state",
-    "text_char_count","text_word_count","label_heuristic","plain_text_present","plain_text_url",
+    "text_char_count","text_word_count","label_heuristic",
+    "plain_text_present","plain_text_url","text_snippet",
     "download_url","cluster_url","court_url","has_citation","has_court","is_per_curiam",
     "outcome_code"
 ]
@@ -104,34 +125,69 @@ def _normalize_api_url(val: Any, resource: str) -> str:
     return f"{base_root}/api/rest/v4/{resource}/{token}/"
 
 
-def _pick_citation(cites) -> str:
+def _normalize_plain_text_url(raw_plain: Any) -> str:
     """
-    Choose a citation string from a CourtListener citations field.
-
-    I prefer 'official' citations when available, otherwise I take the first
-    usable citation in the list or dict.
+    CourtListener 'plain_text' is often a URL string (absolute or relative '/download/...').
+    Return a fetchable absolute URL when possible.
     """
-    if cites is None:
+    if not raw_plain:
         return ""
-    if isinstance(cites, list) and cites:
-        dict_items = [c for c in cites if isinstance(c, dict)]
-        if dict_items:
-            official = next((c for c in dict_items if str(c.get("type","")).lower()=="official"), None)
-            return str((official or dict_items[0]).get("cite","")) or ""
-        scalar = next((c for c in cites if isinstance(c, (str,int,float))), None)
-        return "" if scalar is None else str(scalar)
-    if isinstance(cites, dict):
-        return str(cites.get("cite","")) or ""
-    if isinstance(cites, (str,int,float)):
-        return str(cites)
+    if not isinstance(raw_plain, str):
+        return ""
+    rp = raw_plain.strip()
+    if not rp:
+        return ""
+    if rp.startswith(("http://", "https://")):
+        return rp
+    if rp.startswith("/"):
+        return "https://www.courtlistener.com" + rp
+    # Otherwise it might be actual text content (rare)
     return ""
 
 
+def _pick_citation(cites: Any) -> str:
+    if cites is None:
+        return ""
+
+    if isinstance(cites, list):
+        items = cites
+    elif isinstance(cites, dict):
+        items = [cites]
+    elif isinstance(cites, (str, int, float)):
+        return str(cites).strip()
+    else:
+        return ""
+
+    dict_items = [c for c in items if isinstance(c, dict)]
+    if not dict_items:
+        scalar = next((c for c in items if isinstance(c, (str, int, float))), None)
+        return "" if scalar is None else str(scalar).strip()
+
+    def _score(c: dict) -> tuple:
+        has_cite = int(bool(c.get("cite")))
+        has_parts = int(bool(c.get("volume") and c.get("reporter") and c.get("page")))
+        t = c.get("type")
+        try:
+            t_val = int(t)
+        except Exception:
+            t_val = 999
+        return (-has_cite, -has_parts, t_val)
+
+    dict_items.sort(key=_score)
+    best = dict_items[0]
+
+    if best.get("cite"):
+        return str(best.get("cite")).strip()
+
+    vol = str(best.get("volume", "")).strip()
+    rep = str(best.get("reporter", "")).strip()
+    page = str(best.get("page", "")).strip()
+
+    built = " ".join([x for x in (vol, rep, page) if x])
+    return built.strip()
+
+
 def _infer_state_from_court_name(court_name: str) -> str:
-    """
-    Infer a state name from a court string.
-    Returns 'Federal' if the court mentions U.S.
-    """
     if not court_name:
         return ""
     if re.search(r"U\.S\.", court_name, re.I):
@@ -150,12 +206,13 @@ def _infer_state_from_court_name(court_name: str) -> str:
     return ""
 
 
-def _retry_get_json(session: requests.Session, url: Optional[str], logger: logging.Logger, attempts: int = 3, backoff: float = 0.6) -> Dict[str, Any]:
-    """
-    Fetch JSON with retries + exponential backoff.
-
-    I deal with 429 Retry-After headers when present, and log slow calls.
-    """
+def _retry_get_json(
+    session: requests.Session,
+    url: Optional[str],
+    logger: logging.Logger,
+    attempts: int = 3,
+    backoff: float = 0.6
+) -> Dict[str, Any]:
     if not url:
         return {}
     url = _normalize_url(url)
@@ -163,7 +220,6 @@ def _retry_get_json(session: requests.Session, url: Optional[str], logger: loggi
         try:
             r = session.get(url, timeout=30)
             if r.status_code == 429 and i < attempts - 1:
-                # If throttled, I wait per Retry-After header if given
                 wait = 10.0
                 try:
                     retry_after = r.headers.get("Retry-After")
@@ -194,12 +250,13 @@ def _retry_get_json(session: requests.Session, url: Optional[str], logger: loggi
         return {}
 
 
-def _page_get_with_backoff(session: requests.Session, url: str, params: dict | None, logger: logging.Logger, max_retries: int = 6) -> requests.Response:
-    """
-    Fetch a paginated CourtListener API response with retries/backoff.
-
-    I log 429s and 5xx responses with exponential backoff, and stop after too many.
-    """
+def _page_get_with_backoff(
+    session: requests.Session,
+    url: str,
+    params: dict | None,
+    logger: logging.Logger,
+    max_retries: int = 6
+) -> requests.Response:
     attempt = 0
     while True:
         try:
@@ -243,6 +300,66 @@ def _page_get_with_backoff(session: requests.Session, url: str, params: dict | N
             logger.warning("Timeout/network issue: %s. Retry in %.1fs…", e, wait)
             time.sleep(wait)
 
+
+def _fetch_text_snippet(session: requests.Session, url: str, logger: logging.Logger) -> str:
+    """
+    Fetch a small snippet of text from a plain_text_url.
+    This makes transform labeling deterministic (no extra calls later).
+    """
+    if not url or not url.startswith(("http://", "https://")):
+        return ""
+    try:
+        r = session.get(url, timeout=30, allow_redirects=True)
+        r.raise_for_status()
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        if not (ctype.startswith("text/") or "html" in ctype):
+            return ""
+        txt = (r.text or "").strip()
+        if len(txt) > TEXT_SNIPPET_CHARS:
+            txt = txt[:TEXT_SNIPPET_CHARS]
+        return txt
+    except Exception as e:
+        logger.debug("Snippet fetch failed for %s: %s", url, e)
+        return ""
+
+
+def _extract_opinion_id_from_search_hit(hit: Dict[str, Any]) -> Optional[int]:
+    """
+    CourtListener /api/rest/v4/search/?type=o returns cluster-like hits.
+    Opinion ids are typically in hit["opinions"] (often a list).
+    Fallback to parsing URLs like /opinion/<id>/ or /opinions/<id>/.
+    """
+    # 1) Preferred: iterate hit["opinions"]
+    opinions = hit.get("opinions")
+    if isinstance(opinions, list) and opinions:
+        for item in opinions:
+            if isinstance(item, int) and item > 0:
+                return item
+            if isinstance(item, str):
+                s = item.strip()
+                if s.isdigit():
+                    return int(s)
+                m = re.search(r"/opinions?/(\d+)/", s)  # matches /opinion/123/ or /opinions/123/
+                if m:
+                    return int(m.group(1))
+
+    # 2) Fallback: parse known URL-ish fields
+    for k in ("absolute_url", "resource_uri", "cluster", "opinion"):
+        s = str(hit.get(k) or "")
+        m = re.search(r"/opinions?/(\d+)/", s)
+        if m:
+            return int(m.group(1))
+
+    # 3) Last resort: sometimes an 'id' exists, but don't rely on it
+    oid = hit.get("id")
+    if isinstance(oid, int) and oid > 0:
+        return oid
+    if isinstance(oid, str) and oid.strip().isdigit():
+        return int(oid.strip())
+
+    return None
+
+
 # ------------------------------- MAIN ----------------------------------------
 def extract_data(
     query: str = "corporation",
@@ -254,47 +371,51 @@ def extract_data(
     logger_name: str = "pipeline.extract",
 ) -> pd.DataFrame:
     """
-    Pull opinions from CourtListener matching a keyword search.
+    Extract up to max_cases opinions matching a keyword query.
 
-    I stream results page by page, follow `next` links, and resolve clusters
-    to enrich case_name, court, and citations. Writes checkpoint CSVs every
-    CHECKPOINT_EVERY rows and a final CSV to data/extracted/raw_data.csv.
-
-    Args:
-        query: keyword to search CourtListener opinions.
-        max_cases: maximum number of cases to pull.
-        debug_print_one: print the first opinion JSON for inspection.
-        fast_mode: if True, skip most text parsing (faster).
-        page_size: override API page_size (default depends on fast_mode).
-        logger_name: logger name to use.
+    Hard guarantees:
+    - Never collects more than max_cases rows.
+    - Optionally caps /search/ pagination via MAX_SEARCH_PAGES (env var).
     """
     logger = logging.getLogger(logger_name)
 
     if not API_KEY or not EMAIL:
         raise RuntimeError("Set COURTLISTENER_API_KEY and COURTLISTENER_EMAIL in your environment or .env")
 
+    # ✅ "Bake in" max_cases as a strict positive integer
+    try:
+        max_cases = int(max_cases)
+    except Exception:
+        max_cases = 1000
+    max_cases = max(1, max_cases)
+
     FAST_MODE = DEFAULT_FAST_MODE if fast_mode is None else bool(fast_mode)
 
-    # Session with retries
     headers = {"User-Agent": f"inst414-final-project ({EMAIL})", "Authorization": f"Token {API_KEY}"}
     session = requests.Session()
     session.headers.update(headers)
-    retry = Retry(total=6, connect=4, read=4, backoff_factor=0.7,
-                  status_forcelist=[429,502,503,504], allowed_methods=["GET"], raise_on_status=False)
+    retry = Retry(
+        total=6,
+        connect=4,
+        read=4,
+        backoff_factor=0.7,
+        status_forcelist=[429, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False
+    )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 
     eff_page_size = page_size if page_size is not None else (100 if FAST_MODE else 50)
-    params = {"search": query, "page_size": eff_page_size}
-    logger.info("Extracting cases from CourtListener API… (page_size=%s)", eff_page_size)
+    params = {"q": query, "type": "o", "page_size": eff_page_size}
+    logger.info("Searching opinions from CourtListener /search/… (page_size=%s, max_cases=%s, max_pages=%s)",
+                eff_page_size, max_cases, MAX_SEARCH_PAGES if MAX_SEARCH_PAGES is not None else "None")
 
-    # Ensure cache dir exists
     os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
     http_cache = shelve.open(CACHE_FILE)
 
     def _cached_get_json(url: str) -> dict:
-        """Use the shelve cache for GET JSON calls."""
         key = f"GET::{url}"
         if key in http_cache:
             logger.debug("Cache hit: %s", url)
@@ -303,7 +424,11 @@ def extract_data(
         t0 = time.time()
         data = _retry_get_json(session, url, logger)
         http_cache[key] = data
-        logger.debug("DONE %s in %.2fs (%d bytes)", url, time.time()-t0, len(json.dumps(data)) if data else 0)
+        try:
+            size = len(json.dumps(data)) if data else 0
+        except Exception:
+            size = 0
+        logger.debug("DONE %s in %.2fs (%d bytes)", url, time.time()-t0, size)
         return data
 
     court_cache: Dict[str, Dict[str, Any]] = {}
@@ -311,36 +436,65 @@ def extract_data(
     docket_cache: Dict[str, Dict[str, Any]] = {}
     rows: List[Dict[str, Any]] = []
 
-    url = API_URL
+    url = SEARCH_URL
     first = True
     printed_debug = False
     page_idx = 0
+    snippet_fetches = 0
 
     try:
         while url and len(rows) < max_cases:
+            # Safety valve: cap number of /search/ pages if configured
+            if MAX_SEARCH_PAGES is not None and page_idx >= MAX_SEARCH_PAGES:
+                logger.info("Reached MAX_SEARCH_PAGES=%d; stopping pagination.", MAX_SEARCH_PAGES)
+                break
+
             r = _page_get_with_backoff(session, url, params if first else None, logger)
             payload = r.json()
             first = False
             page_idx += 1
 
             results = payload.get("results", []) or []
-            logger.info("Page %d: got %d results | next=%s", page_idx, len(results), "yes" if payload.get("next") else "no")
+            logger.info("Search page %d: got %d results | rows=%d/%d | next=%s",
+                        page_idx, len(results), len(rows), max_cases, "yes" if payload.get("next") else "no")
+            
+            rows_before_page = len(rows)
+            skipped_no_id = 0
+            skipped_no_op = 0
 
-            for op in results:
+            for hit in results:
+                if len(rows) >= max_cases:
+                    break
+
+                op_id = _extract_opinion_id_from_search_hit(hit)
+                if not op_id:
+                    skipped_no_id += 1
+
+                    # throttle this log so you don't spam
+                    if (page_idx <= 3) or (random.random() < 0.02):
+                        logger.warning(
+                            "Skipping search hit: could not extract opinion id. keys=%s",
+                            sorted(list(hit.keys()))
+                        )
+                    continue
+                
                 t_op = time.time()
+
+                # Fetch the actual opinion object (no invalid query params)
+                op_url = OPINION_DETAIL_URL.format(id=op_id)
+                op = _cached_get_json(op_url)
+                if not op:
+                    skipped_no_op += 1
+                    continue
 
                 if debug_print_one and not printed_debug:
                     print("\n=== DEBUG: first opinion payload ===")
                     print("keys:", sorted(list(op.keys())))
-                    print(json.dumps(op, indent=2)[:3000])  # truncate so it doesn't spam
+                    print(json.dumps(op, indent=2)[:3000])
                     print("=== END DEBUG ===\n")
                     printed_debug = True
-                    return pd.DataFrame()  # stop early; avoids writing files
+                    return pd.DataFrame()
 
-                if len(rows) >= max_cases:
-                    break
-
-                # ---- pull fields safely ----
                 case_id        = op.get("id")
                 date_created   = op.get("date_created", "")
                 date_modified  = op.get("date_modified", "")
@@ -351,10 +505,8 @@ def extract_data(
                 joined_by_cnt  = len(op.get("joined_by", []) or [])
                 download_url   = op.get("download_url", "")
 
-                # cluster may be id/int, relative, or full URL
                 cluster_raw    = op.get("cluster") or ""
                 cluster_url    = _normalize_api_url(cluster_raw, "clusters") if cluster_raw else ""
-
                 opinion_cites  = op.get("citations", None)
 
                 m = re.match(r"^(\d{4})-", date_created or "")
@@ -362,8 +514,14 @@ def extract_data(
 
                 raw_plain = op.get("plain_text") or ""
                 plain_text_present = int(bool(raw_plain))
-                plain_text_url = raw_plain if (isinstance(raw_plain, str) and raw_plain.startswith(("http://","https://"))) else ""
-                text = "" if FAST_MODE else (raw_plain if isinstance(raw_plain, str) and not plain_text_url else "")
+                plain_text_url = _normalize_plain_text_url(raw_plain)
+
+                text_snippet = ""
+                if (not FAST_MODE) and plain_text_url and snippet_fetches < SNIPPET_FETCH_MAX:
+                    time.sleep(SNIPPET_FETCH_SLEEP + random.uniform(0, 0.08))
+                    text_snippet = _fetch_text_snippet(session, plain_text_url, logger)
+                    if text_snippet:
+                        snippet_fetches += 1
 
                 # Cluster enrichment
                 cluster: Dict[str, Any] = {}
@@ -372,17 +530,19 @@ def extract_data(
                     cluster = cluster_cache.get(ckey) or _cached_get_json(ckey)
                     cluster_cache[ckey] = cluster
 
-                case_name = (cluster.get("caseName") or cluster.get("case_name") or cluster.get("caption") or
-                             op.get("case_name","") or "")
+                case_name = (
+                    cluster.get("caseName")
+                    or cluster.get("case_name")
+                    or cluster.get("caption")
+                    or op.get("case_name","")
+                    or ""
+                )
 
-                # CourtListener v4 commonly uses "citation" (singular) on clusters.
-                # Some older/alt payloads may use "citations", so we support both.
                 cluster_citations = cluster.get("citation", None)
                 if cluster_citations is None:
                     cluster_citations = cluster.get("citations", None)
-
                 all_citations = cluster_citations if cluster_citations is not None else opinion_cites
-                
+
                 citation = _pick_citation(all_citations) or "Unknown"
                 has_citation = int(citation != "Unknown")
 
@@ -391,9 +551,12 @@ def extract_data(
                 court_url  = ""
 
                 if not SKIP_HOPS:
-                    # A) cluster -> court (fastest)
                     if not court_name:
-                        clu_court = (cluster.get("court") or cluster.get("court_id") or op.get("court") or op.get("court_id") or "")
+                        clu_court = (
+                            cluster.get("court") or cluster.get("court_id")
+                            or op.get("court") or op.get("court_id")
+                            or ""
+                        )
                         if isinstance(clu_court, (str, int)) and str(clu_court).strip():
                             court_api = _normalize_api_url(clu_court, "courts")
                             ccu = _normalize_url(court_api)
@@ -403,14 +566,21 @@ def extract_data(
                                 court_name = cj.get("full_name") or cj.get("name_abbreviation") or cj.get("name") or ""
                                 court_url = ccu
                         elif isinstance(clu_court, dict):
-                            court_name = (clu_court.get("full_name") or
-                                          clu_court.get("name_abbreviation") or
-                                          clu_court.get("name") or "")
-                            court_url = _normalize_api_url(clu_court.get("resource_uri",""), "courts") if clu_court.get("resource_uri") else court_url
+                            court_name = (
+                                clu_court.get("full_name")
+                                or clu_court.get("name_abbreviation")
+                                or clu_court.get("name")
+                                or ""
+                            )
+                            if clu_court.get("resource_uri"):
+                                court_url = _normalize_api_url(clu_court.get("resource_uri",""), "courts")
 
-                    # B) (optional) docket hop
                     if INCLUDE_DOCKET_HOP and not court_name:
-                        docket_val = (cluster.get("docket") or cluster.get("docket_id") or op.get("docket") or op.get("docket_id") or "")
+                        docket_val = (
+                            cluster.get("docket") or cluster.get("docket_id")
+                            or op.get("docket") or op.get("docket_id")
+                            or ""
+                        )
                         if isinstance(docket_val, (str, int)) and str(docket_val).strip():
                             dcu = _normalize_api_url(docket_val, "dockets")
                             docket = docket_cache.get(dcu) or _cached_get_json(dcu)
@@ -423,24 +593,28 @@ def extract_data(
                                 court_name = cj.get("full_name") or cj.get("name_abbreviation") or cj.get("name") or ""
                                 court_url = dcu2
                             elif isinstance(d_court, dict):
-                                court_name = (d_court.get("full_name") or
-                                              d_court.get("name_abbreviation") or
-                                              d_court.get("name") or "")
-                                court_url = _normalize_api_url(d_court.get("resource_uri",""), "courts") if d_court.get("resource_uri") else court_url
+                                court_name = (
+                                    d_court.get("full_name")
+                                    or d_court.get("name_abbreviation")
+                                    or d_court.get("name")
+                                    or ""
+                                )
+                                if d_court.get("resource_uri"):
+                                    court_url = _normalize_api_url(d_court.get("resource_uri",""), "courts")
 
                 court_name = re.sub(r"\s+", " ", (court_name or "")).strip()
                 jurisdiction_state = _infer_state_from_court_name(court_name) or "Unknown"
                 has_court = int(bool(court_name and court_name != "Unknown"))
 
-                # Heuristic labeling if not in FAST_MODE
+                # Heuristic labeling: use snippet when available
                 if FAST_MODE:
                     text_char_count = 0
                     text_word_count = 0
                     label_heuristic = "other"
                 else:
-                    text_char_count = len(text) if text else 0
-                    text_word_count = len(re.findall(r"\w+", text)) if text else 0
-                    t = (text or "").lower()
+                    text_char_count = len(text_snippet) if text_snippet else 0
+                    text_word_count = len(re.findall(r"\w+", text_snippet)) if text_snippet else 0
+                    t = (text_snippet or "").lower()
                     if "affirmed" in t and "reversed" in t:
                         label_heuristic = "mixed"
                     elif "affirmed" in t:
@@ -455,6 +629,8 @@ def extract_data(
                         label_heuristic = "other"
 
                 rows.append({
+                    "opinion_id": op_id,
+                    "opinion_api_url": op_url,
                     "case_id": case_id,
                     "date_created": date_created,
                     "date_modified": date_modified,
@@ -473,6 +649,7 @@ def extract_data(
                     "label_heuristic": label_heuristic,
                     "plain_text_present": plain_text_present,
                     "plain_text_url": plain_text_url,
+                    "text_snippet": text_snippet,
                     "download_url": download_url or "",
                     "cluster_url": cluster_url or "",
                     "court_url": court_url or "",
@@ -491,17 +668,25 @@ def extract_data(
                     os.makedirs("data/extracted", exist_ok=True)
                     tmp.to_csv("data/extracted/raw_data_partial.csv", index=False, columns=OUTPUT_COLUMNS)
                     logger.info("Checkpoint wrote %d rows -> data/extracted/raw_data_partial.csv", len(rows))
+            
+            if len(rows) == rows_before_page:
+                logger.warning(
+                    "No rows added on page %d (hits=%d, skipped_no_id=%d, skipped_no_op=%d).",
+                    page_idx, len(results), skipped_no_id, skipped_no_op
+                )
+                # If this happens repeatedly, its probably have an extraction mismatch.
 
             time.sleep(0.15)
             url = payload.get("next")
             params = None
 
-        # Final write
+
         df = pd.DataFrame(rows)
         os.makedirs("data/extracted", exist_ok=True)
         outpath = "data/extracted/raw_data.csv"
         df.to_csv(outpath, index=False, columns=OUTPUT_COLUMNS)
         logger.info("Extracted %d cases to %s", len(df), outpath)
+        logger.info("Snippet fetches: %d (cap=%d)", snippet_fetches, SNIPPET_FETCH_MAX)
         return df
 
     finally:
@@ -510,6 +695,7 @@ def extract_data(
         except Exception:
             pass
 
+
 # Manual test
 if __name__ == "__main__":
-    extract_data(query="corporation", max_cases=200, fast_mode=True, page_size=100)
+    extract_data(query="corporation", max_cases=200, fast_mode=False, page_size=50)
