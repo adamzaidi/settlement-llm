@@ -45,4 +45,10 @@ def setup_logger(
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
 
+    # IMPORTANT:
+    # Prevent log messages from propagating to the root logger.
+    # This avoids duplicate log lines when other modules
+    # (e.g., run_context) also configure logging.
+    logger.propagate = False
+
     return logger

@@ -1,110 +1,224 @@
-CURRENTLY IN DEVELOPMENT - LLM to determine case outcome likelihood
+# Court Opinion Outcome Triage — ETL + Baseline ML (CourtListener)
 
 **Author:** Adam Zaidi  
-**Date:** August 2025  
+**Last updated:** January 2026  
 
 ---
 
 ## Project Overview
-This project builds a full **ETL + ML pipeline** around U.S. court opinions using the **CourtListener API**. I extract opinion data about corporations, enrich it with court/citation metadata, transform it into a clean tabular dataset, and then train simple classification models to predict case outcomes.  
 
-The project is designed to answer a **business problem**: *“Given court opinions about corporations, what can I learn about how cases resolve (Win/Loss/Settlement) and how outcomes vary by court?”*  
+This project builds a full **ETL + analytics pipeline** around U.S. court opinions using the **CourtListener API**.
 
-The pipeline outputs:
-- Cleaned and enriched case data  
-- Outcome label assignments (coarse + fine)  
-- Evaluation artifacts for classification models  
-- Visualizations to support non-technical stakeholders  
+The pipeline is designed as a **decision-support tool**, not just a classifier. It performs three core functions end-to-end:
+
+1. **Collect** court opinions for a query (e.g., `corporation`) and enrich them with court and citation metadata  
+2. **Extract outcome signals** from opinion text using **rule-based labeling with confidence scoring**  
+3. **Triage uncertain cases** into a **human-in-the-loop review queue**, while training baseline ML models for comparison  
+
+The project answers the following question:
+
+> **How do outcomes vary across courts, and which cases require human review because outcome extraction is uncertain?**
+
+---
+
+## Scope and Design Philosophy
+
+### What This Project Is
+
+- A reproducible **ETL + analytics pipeline**
+- Focused on **opinion-level dispositions**, not docket-level procedural status
+- Explicitly uncertainty-aware via confidence scores and review flags
+- Designed with auditability, explainability, and extensibility in mind
+
+### What This Project Is Not
+
+- A production-grade legal outcome predictor
+- A substitute for docket metadata or PACER data
+- An attempt to infer the full “true case result” beyond the opinion itself
+
+---
+
+## Outcome Labels
+
+This project classifies **what the court did in the opinion**, not the full lifecycle outcome of the case.
+
+### Coarse Outcome (`outcome_code`)
+
+- **0 — other / unclear**
+- **1 — affirmed_or_dismissed**
+- **2 — changed_or_mixed**  
+  (reversed, vacated, remanded, or mixed outcomes)
+
+### Fine Outcome (`outcome_label_fine`, `outcome_code_fine`)
+
+- `affirmed`
+- `dismissed`
+- `reversed`
+- `vacated`
+- `remanded`
+- `mixed`
+- `other`
+
+Each labeled opinion includes:
+- An **evidence snippet**
+- A **confidence score** (heuristic, 0–1)
+- A **needs_review flag** indicating whether human review is recommended
+
+---
+
+## Human-in-the-Loop Review
+
+Uncertainty is handled explicitly rather than hidden.
+
+Cases are flagged for review when:
+- The outcome is `other` or `mixed`
+- The confidence score falls below a threshold (default: `0.60`)
+- Strong disposition language is missing or ambiguous
+
+Flagged cases are written to:
+
+```
+data/processed/review_queue.csv
+```
+
+This design allows the pipeline to function as a **triage tool**, not just a classifier.
 
 ---
 
 ## How to Run the Pipeline
 
-1. **Clone the repo & create a virtual environment**
-   ```bash
-   git clone <your_repo_url>
-   cd <repo_name>
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
+### 1. Clone the repository and install dependencies
 
-2. **Set environment variables** (create a `.env` file or export manually):
-   ```
-   COURTLISTENER_API_KEY=YOUR_KEY_HERE
-   COURTLISTENER_EMAIL=your@email.com
-   ```
+```bash
+git clone <your_repo_url>
+cd <repo_name>
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-3. **Run end-to-end pipeline**
-   ```bash
-   python main.py
-   ```
+### 2. Set environment variables
 
----
+Create a `.env` file or export manually:
 
-## Pipeline Steps
+```bash
+COURTLISTENER_API_KEY=YOUR_API_KEY
+COURTLISTENER_EMAIL=your@email.com
+```
 
-1. **Extract**  
-   - Source: CourtListener API (`opinions/` endpoint)  
-   - Output: `data/extracted/raw_data.csv`  
+### 3. Run the full pipeline
 
-2. **Transform**  
-   - Cleans types, fills missing values  
-   - Enriches with court names, citations, and opinion text signals  
-   - Assigns **outcome_code** (coarse) and **outcome_code_fine** (fine)  
-   - Output: `data/processed/processed_data.csv`  
-
-3. **Load**  
-   - Reads processed CSV into a pandas DataFrame for analysis  
-
-4. **Modeling**  
-   - Trains Logistic Regression and Random Forest (or skips gracefully if not enough labels)  
-   - Always writes an evaluation artifact to `data/model-eval/`  
-   - Evaluation includes classification reports, confusion matrices, and summary JSON  
-
-5. **Visualizations**  
-   - Generates outcome distributions, top courts, Pareto charts, trends over time, and word count plots  
-   - Output: `data/outputs/*.png`  
-
-6. **Validation**  
-   - Runs lightweight schema + quality checks after load  
-   - Logs missing columns, invalid codes, or duplicate IDs  
+```bash
+python main.py run
+```
 
 ---
 
-## Outputs
+## Pipeline Stages
 
-- `data/extracted/raw_data.csv` – raw API dump  
-- `data/processed/processed_data.csv` – enriched dataset  
-- `data/model-eval/` – evaluation reports, confusion matrices, summary JSON  
-- `data/outputs/` – visualization PNGs  
-- `logs/pipeline.log` – log file of pipeline run  
+### 1. Extract
+- Source: CourtListener `/search/` and `/opinions/` endpoints  
+- Enrichment includes:
+  - Court metadata
+  - Citation data
+  - Opinion text signals (when available)
+
+**Output**
+```
+data/extracted/raw_data.csv
+```
 
 ---
 
-## Repo Structure
+### 2. Transform
+- Normalizes types and timestamps
+- Cleans court and citation fields
+- Extracts opinion text signals
+- Applies rule-based outcome labeling
+- Computes:
+  - Confidence score
+  - Disposition-zone indicators
+  - Review flags
+
+**Outputs**
+```
+data/processed/processed_data.csv
+data/processed/review_queue.csv
+```
+
+---
+
+### 3. Load
+- Loads processed data into a pandas DataFrame
+- Performs lightweight schema and quality validation
+
+---
+
+### 4. Modeling
+- Baseline classifiers:
+  - Logistic Regression
+  - Random Forest
+- Features:
+  - One-hot encoded court
+- Labels:
+  - Coarse (`outcome_code`)
+  - Fine (`outcome_code_fine`)
+- Training skips gracefully if only one class is present
+
+**Outputs**
+```
+data/model-eval/
+├── classification_report_*.csv
+├── confusion_*.csv
+└── evaluation_summary.json
+```
+
+---
+
+### 5. Visualizations
+
+Generates report-ready charts, including:
+- Outcome distributions
+- Top courts by volume
+- Court Pareto analysis
+- Outcomes over time
+- Opinion word count distributions
+
+**Outputs**
+```
+data/outputs/*.png
+```
+
+---
+
+## Validation and Logging
+
+- All pipeline steps log to:
+```
+logs/pipeline.log
+```
+- Schema and domain validation occurs after loading
+- Model training always writes evaluation artifacts, even if training is skipped
+
+---
+
+## Repository Structure
 
 ```
 .
-├── analysis/
-│   └── model.py              # Train & evaluate classifiers
-├── etl/
-│   ├── extract.py            # Extract raw data from CourtListener
-│   ├── transform.py          # Clean + enrich data
-│   ├── load.py               # Load processed data
-│   └── enrich_helpers.py     # Court/citation inference utilities
-├── utils/
-│   ├── logging_setup.py      # Logging configuration
-│   └── validators.py         # Post-load validation checks
-├── vis/
-│   └── visualizations.py     # Generates charts
-├── evaluate.py               # Extra model evaluation helpers
-├── main.py                   # Pipeline runner
-├── requirements.txt          # Dependencies
+├── etl/                # Extract / Transform / Load
+├── analysis/           # Modeling and evaluation
+├── vis/                # Visualization generation
+├── utils/              # Logging, validation, helpers
 ├── data/
-│   ├── reference-tables/     # Data dictionaries (kept in repo)
-│   └── (other subdirs ignored in git)
-├── logs/                     # Runtime logs (gitignored)
+│   ├── extracted/
+│   ├── processed/
+│   ├── model-eval/
+│   ├── outputs/
+│   └── reference-tables/
+├── runs/               # Run artifacts (params, logs, plots)
+├── logs/
+├── main.py             # Pipeline runner
 └── README.md
 ```
 
@@ -112,21 +226,36 @@ The pipeline outputs:
 
 ## Data Dictionaries
 
-See `data/reference-tables/`:
-- `raw_data_dictionary.csv` – columns from extraction stage  
-- `processed_data_dictionary.csv` – final dataset columns  
+Reference tables are located in:
+
+```
+data/reference-tables/
+```
+
+They document:
+- Raw extraction fields
+- Processed dataset columns
+- Outcome codes and meanings
 
 ---
 
 ## Known Limitations
-- CourtListener’s `plain_text` is not always present; outcome labels may fall back to regex heuristics.  
-- Model features are simple (court one-hot only); accuracy is not the focus.  
-- API rate limits may throttle extraction if `max_cases` is large.  
+
+- Opinion text does not always contain explicit disposition language
+- CourtListener `plain_text` availability is inconsistent
+- Outcome labeling relies on heuristics, not authoritative docket status
+- Models use intentionally simple features (court only)
 
 ---
 
-## Branch Policy
-- All development occurs in `dev`  
-- Merge to `test` for integration checks  
-- Merge `test` → `main` for final grading  
-- All three branches are in sync for submission; grading happens on `main`  
+## Future Extensions
+
+- SQL-backed storage (SQLite or Postgres)
+- Docket-level enrichment
+- Embedding-based outcome classification
+- Active learning using review queue feedback
+- Court-specific disposition modeling
+
+---
+
+All branches are kept in sync for reproducibility.
