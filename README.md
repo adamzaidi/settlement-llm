@@ -15,9 +15,34 @@ The pipeline is designed as a **decision-support tool**, not just a classifier. 
 2. **Extract outcome signals** from opinion text using **rule-based labeling with confidence scoring**  
 3. **Triage uncertain cases** into a **human-in-the-loop review queue**, while training baseline ML models for comparison  
 
-The project answers the following question:
+## Why This Project Exists
 
-> **How do outcomes vary across courts, and which cases require human review because outcome extraction is uncertain?**
+Court opinion text is widely available, but **usable outcome data is not**.
+
+While APIs like CourtListener provide access to opinions, they rarely expose a clean, authoritative field that answers the practical question analysts care about:
+
+> *“What did the court actually do in this decision?”*
+
+In practice:
+- Docket-level outcomes live outside opinion text
+- Opinion language varies widely across courts and jurisdictions
+- Automated extraction is inherently uncertain
+
+This project exists to address that gap **honestly and transparently**.
+
+Rather than attempting to infer a single “true” case outcome, the pipeline:
+
+- Extracts **opinion-level disposition signals** directly from text  
+- Quantifies **uncertainty** instead of hiding it  
+- Routes ambiguous cases to a **human-in-the-loop review queue**  
+- Produces artifacts that can be audited, validated, and improved over time  
+
+The result is a **decision-support tool**, not a black-box predictor.
+
+It is designed for analysts who need:
+- Structured outcome data from unstructured legal text  
+- Visibility into *how confident* an automated label actually is  
+- A workflow that supports **iterative improvement**, not one-shot predictions  
 
 ---
 
@@ -29,12 +54,6 @@ The project answers the following question:
 - Focused on **opinion-level dispositions**, not docket-level procedural status
 - Explicitly uncertainty-aware via confidence scores and review flags
 - Designed with auditability, explainability, and extensibility in mind
-
-### What This Project Is Not
-
-- A production-grade legal outcome predictor
-- A substitute for docket metadata or PACER data
-- An attempt to infer the full “true case result” beyond the opinion itself
 
 ---
 
@@ -81,7 +100,6 @@ Flagged cases are written to:
 data/processed/review_queue.csv
 ```
 
-This design allows the pipeline to function as a **triage tool**, not just a classifier.
 
 ---
 
