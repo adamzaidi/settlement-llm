@@ -1,4 +1,4 @@
-# 👨‍⚖️ courtpipe - Court Opinion Outcome Intelligence
+# 👨‍⚖️ courtpipe - Court Opinion Analytics Pipeline
 
 > Building a reliable system for extracting, structuring, and reviewing judicial outcomes at scale.
 
