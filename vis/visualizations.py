@@ -1,3 +1,4 @@
+# vis/visualizations.py
 # -----------------------------------------------------------------------------
 # What this file does
 # 1) Produce easy-to-read charts (PNG) for the report:
@@ -8,17 +9,21 @@
 #    - Opinions over time
 #    - Word count histogram + boxplot by outcome
 #
-# CHANGE (tool-grade upgrades):
-# 2) Add "Model Comparison" chart (baseline vs logreg vs rf) from model metrics JSON.
-# 3) Add "Review Queue Overview" chart from needs_review + outcome_confidence.
-# 4) Fix outcome label mapping to match YOUR transform codes.
+# Tool-grade upgrades baked in:
+# 2) "Model Comparison" charts (baseline vs logreg vs rf) from model metrics JSON.
+# 3) "Review Queue Overview" charts from needs_review + outcome_confidence.
+# 4) Correct outcome label mapping to match YOUR transform codes.
 #
 # 5) Save everything to data/outputs/
 # -----------------------------------------------------------------------------
 
+from __future__ import annotations
+
 import os
 import json
 import logging
+from typing import Dict, Any, Optional, List, Tuple
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -29,23 +34,25 @@ OUTDIR = "data/outputs"
 EVAL_DIR = "data/model-eval"
 
 # -----------------------------------------------------------------------------
-# CHANGE: Correct outcome mapping for YOUR transform codes
-# outcome_code: 0 other, 1 affirmed/dismissed, 2 changed/mixed (reversed/vacated/remanded)
+# Correct outcome mapping for YOUR transform codes
+# outcome_code: 0 other, 1 affirmed/dismissed, 2 changed/mixed (reversed/vacated/remanded/mixed)
 # -----------------------------------------------------------------------------
 OUTCOME_LABELS = {
     0: "other",
     1: "affirmed_or_dismissed",
     2: "changed_or_mixed",
 }
-OUTCOME_ORDER = [0, 1, 2]  # display order for stacked bars
+OUTCOME_ORDER = [0, 1, 2]  # stable display order
 
 
+# -----------------------------------------------------------------------------
 # small helpers
-def _ensure_outdir():
+# -----------------------------------------------------------------------------
+def _ensure_outdir() -> None:
     os.makedirs(OUTDIR, exist_ok=True)
 
 
-def _finish_fig(path: str):
+def _finish_fig(path: str) -> None:
     try:
         plt.tight_layout()
         try:
@@ -57,19 +64,20 @@ def _finish_fig(path: str):
         plt.close()
 
 
-def _labelify(values):
-    """Map numeric codes to human-readable outcome labels."""
-    out = []
+def _labelify(values) -> List[str]:
+    """Map numeric outcome codes to human-readable labels."""
+    out: List[str] = []
     for v in list(values):
         try:
             iv = int(v)
-            out.append(OUTCOME_LABELS.get(iv, str(v)))
+            out.append(OUTCOME_LABELS.get(iv, str(iv)))
         except Exception:
             out.append(str(v))
     return out
 
 
 def _aggregate_top_n(series: pd.Series, top_n: int = 15, other_label: str = "Other") -> pd.Series:
+    """Collapse long tail into 'Other' for readability."""
     counts = series.value_counts()
     if len(counts) <= top_n:
         return counts
@@ -78,7 +86,14 @@ def _aggregate_top_n(series: pd.Series, top_n: int = 15, other_label: str = "Oth
     return pd.concat([top, pd.Series({other_label: tail_sum})])
 
 
-def _barh_from_counts(counts: pd.Series, title: str, xlabel: str, ylabel: str, outname: str, figsize=(10, 6)):
+def _barh_from_counts(
+    counts: pd.Series,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    outname: str,
+    figsize: Tuple[int, int] = (10, 6),
+) -> None:
     fig, ax = plt.subplots(figsize=figsize)
     ax.barh(range(len(counts)), counts.values)
     ax.set_yticks(range(len(counts)))
@@ -90,38 +105,36 @@ def _barh_from_counts(counts: pd.Series, title: str, xlabel: str, ylabel: str, o
     _finish_fig(os.path.join(OUTDIR, outname))
 
 
-def _read_metrics_json(path: str) -> dict:
+def _read_json(path: str) -> Dict[str, Any]:
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 
+def _safe_series_numeric(s: pd.Series, default: float = 0.0) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(default)
+
+
 # -----------------------------------------------------------------------------
-# charts
+# Core charts
 # -----------------------------------------------------------------------------
-def outcome_distribution(df: pd.DataFrame):
-    """Show how outcomes are distributed (counts + percents above bars)."""
+def outcome_distribution(df: pd.DataFrame) -> None:
+    """Outcome distribution (counts + %)."""
     if "outcome_code" not in df.columns:
         logger.warning("Outcome distribution: 'outcome_code' not found; skipping.")
         return
 
-    counts = (
-        pd.to_numeric(df["outcome_code"], errors="coerce")
-        .fillna(-1)
-        .astype(int)
-        .value_counts(dropna=False)
-        .sort_index()
-    )
+    y = pd.to_numeric(df["outcome_code"], errors="coerce").fillna(-1).astype(int)
+    counts = y.value_counts(dropna=False).sort_index()
 
-    # Hide unknown bucket if it appears (-1), but keep it if it's meaningful
     labels = ["Unknown" if i == -1 else OUTCOME_LABELS.get(i, str(i)) for i in counts.index]
 
     fig, ax = plt.subplots(figsize=(7.5, 4.8))
     bars = ax.bar(labels, counts.values)
-    ax.set_title("Outcome Distribution (Count & %)")
-    ax.set_xlabel("Outcome (coarse)")
+    ax.set_title("Outcome Distribution (Coarse) — Count & %")
+    ax.set_xlabel("Outcome")
     ax.set_ylabel("Count")
 
     total = counts.sum()
@@ -140,8 +153,8 @@ def outcome_distribution(df: pd.DataFrame):
     _finish_fig(os.path.join(OUTDIR, "outcome_distribution.png"))
 
 
-def top_outcomes_overall(df: pd.DataFrame):
-    """Horizontal bar chart of the most common outcomes overall."""
+def top_outcomes_overall(df: pd.DataFrame) -> None:
+    """Horizontal bar of most common coarse outcomes."""
     if "outcome_code" not in df.columns:
         logger.warning("Top outcomes: 'outcome_code' not found; skipping.")
         return
@@ -150,7 +163,7 @@ def top_outcomes_overall(df: pd.DataFrame):
         if pd.isna(x):
             return "Unknown"
         try:
-            return OUTCOME_LABELS.get(int(x), str(x))
+            return OUTCOME_LABELS.get(int(x), str(int(x)))
         except Exception:
             return "Unknown"
 
@@ -158,7 +171,7 @@ def top_outcomes_overall(df: pd.DataFrame):
 
     _barh_from_counts(
         counts=counts.sort_values(ascending=True),
-        title="Top Outcomes Overall (coarse)",
+        title="Top Outcomes Overall (Coarse)",
         xlabel="Count",
         ylabel="Outcome",
         outname="top_outcomes_overall.png",
@@ -166,17 +179,14 @@ def top_outcomes_overall(df: pd.DataFrame):
     )
 
 
-def cases_by_court_stacked(df: pd.DataFrame, top_n: int = 12):
-    """
-    Show cases by court as stacked bars, split by outcome.
-    Only the top_n courts are shown explicitly; everything else goes into "Other".
-    """
+def cases_by_court_stacked(df: pd.DataFrame, top_n: int = 12) -> None:
+    """Stacked barh: cases by court split by coarse outcome, top N + other."""
     if "court" not in df.columns or "outcome_code" not in df.columns:
         logger.warning("Stacked by court: missing 'court' or 'outcome_code'; skipping.")
         return
 
-    counts = _aggregate_top_n(df["court"], top_n=top_n, other_label="Other")
-    keep_courts = list(counts.index)
+    top_counts = _aggregate_top_n(df["court"].fillna("Unknown"), top_n=top_n, other_label="Other")
+    keep_courts = list(top_counts.index)
 
     dd = df.copy()
     dd["court_limited"] = np.where(dd["court"].isin(keep_courts), dd["court"], "Other")
@@ -199,7 +209,7 @@ def cases_by_court_stacked(df: pd.DataFrame, top_n: int = 12):
 
     for c in cols:
         vals = pivot[c].values
-        label = OUTCOME_LABELS.get(c, str(c))
+        label = OUTCOME_LABELS.get(int(c), str(c))
         ax.barh(y_pos, vals, left=left, label=label)
         left += vals
 
@@ -213,13 +223,13 @@ def cases_by_court_stacked(df: pd.DataFrame, top_n: int = 12):
     _finish_fig(os.path.join(OUTDIR, "cases_by_court_stacked.png"))
 
 
-def courts_pareto(df: pd.DataFrame, top_n: int = 20):
-    """Pareto chart: courts ranked by volume (bars) with a cumulative % line."""
+def courts_pareto(df: pd.DataFrame, top_n: int = 20) -> None:
+    """Pareto: courts by volume + cumulative %."""
     if "court" not in df.columns:
         logger.warning("Courts Pareto: 'court' not found; skipping.")
         return
 
-    counts_full = df["court"].value_counts()
+    counts_full = df["court"].fillna("Unknown").value_counts()
     if len(counts_full) > top_n:
         top = counts_full.head(top_n)
         other_sum = counts_full.iloc[top_n:].sum()
@@ -246,8 +256,7 @@ def courts_pareto(df: pd.DataFrame, top_n: int = 20):
     ax2.set_ylim(0, 110)
 
     if len(cum_pct) > 0:
-        mid_idx = max(len(cum_pct) // 2, 0)
-        for idx in {mid_idx, len(cum_pct) - 1}:
+        for idx in {max(len(cum_pct) // 2, 0), len(cum_pct) - 1}:
             ax2.annotate(
                 f"{cum_pct.iloc[idx]:.0f}%",
                 (idx, cum_pct.iloc[idx]),
@@ -260,8 +269,8 @@ def courts_pareto(df: pd.DataFrame, top_n: int = 20):
     _finish_fig(os.path.join(OUTDIR, "courts_pareto.png"))
 
 
-def opinions_over_time(df: pd.DataFrame):
-    """Simple line plot of how many opinions appear per year."""
+def opinions_over_time(df: pd.DataFrame) -> None:
+    """Line: opinions per year."""
     if "opinion_year" not in df.columns:
         logger.warning("Opinions over time: 'opinion_year' not found; skipping.")
         return
@@ -280,8 +289,8 @@ def opinions_over_time(df: pd.DataFrame):
     _finish_fig(os.path.join(OUTDIR, "opinions_over_time.png"))
 
 
-def text_wordcount_hist(df: pd.DataFrame, max_bin: int = 5000):
-    """Histogram of opinion word counts, clipped at max_bin to avoid skew."""
+def text_wordcount_hist(df: pd.DataFrame, max_bin: int = 5000) -> None:
+    """Histogram: word counts (clipped)."""
     if "text_word_count" not in df.columns:
         logger.warning("Word count hist: 'text_word_count' not found; skipping.")
         return
@@ -300,8 +309,8 @@ def text_wordcount_hist(df: pd.DataFrame, max_bin: int = 5000):
     _finish_fig(os.path.join(OUTDIR, "text_wordcount_hist.png"))
 
 
-def wordcount_by_outcome_box(df: pd.DataFrame, max_cap: int = 10000):
-    """Boxplot of opinion word counts grouped by coarse outcome."""
+def wordcount_by_outcome_box(df: pd.DataFrame, max_cap: int = 10000) -> None:
+    """Boxplot: word counts grouped by coarse outcome."""
     if "text_word_count" not in df.columns or "outcome_code" not in df.columns:
         logger.warning("Wordcount by outcome: missing columns; skipping.")
         return
@@ -314,7 +323,6 @@ def wordcount_by_outcome_box(df: pd.DataFrame, max_cap: int = 10000):
 
     dd["wc"] = dd["wc"].clip(upper=max_cap)
 
-    # stable order
     ys = sorted([int(x) for x in dd["y"].unique() if pd.notna(x)])
     groups = [dd.loc[dd["y"] == k, "wc"].values for k in ys]
     labels = _labelify(ys)
@@ -328,11 +336,66 @@ def wordcount_by_outcome_box(df: pd.DataFrame, max_cap: int = 10000):
 
 
 # -----------------------------------------------------------------------------
-# CHANGE: Tool-feel charts
+# Tool-grade additions
 # -----------------------------------------------------------------------------
-def model_comparison_from_metrics(label: str = "coarse"):
+def review_queue_overview(df: pd.DataFrame) -> None:
     """
-    Build a simple model comparison bar chart from metrics JSON files.
+    Review queue charts:
+      1) counts + % flagged
+      2) confidence histogram split by needs_review
+    """
+    needed = {"needs_review", "outcome_confidence"}
+    if not needed.issubset(set(df.columns)):
+        missing = sorted(list(needed - set(df.columns)))
+        logger.warning("Review queue overview: missing %s; skipping.", ", ".join(missing))
+        return
+
+    _ensure_outdir()
+
+    nr = pd.to_numeric(df["needs_review"], errors="coerce").fillna(1).astype(int)
+    conf = pd.to_numeric(df["outcome_confidence"], errors="coerce").fillna(0.0).astype(float)
+
+    pct_review = float((nr == 1).mean() * 100.0)
+    counts = pd.Series(
+        {"auto_pass": int((nr == 0).sum()), "needs_review": int((nr == 1).sum())}
+    )
+
+    # 1) bucket chart
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
+    bars = ax.bar(counts.index, counts.values)
+    ax.set_title(f"Review Queue Overview — {pct_review:.1f}% flagged")
+    ax.set_xlabel("Bucket")
+    ax.set_ylabel("Count")
+    for b, v in zip(bars, counts.values):
+        ax.annotate(
+            str(v),
+            xy=(b.get_x() + b.get_width() / 2, b.get_height()),
+            xytext=(0, 4),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+    _finish_fig(os.path.join(OUTDIR, "review_queue_overview.png"))
+
+    # 2) confidence histogram split by triage
+    conf_review = conf[nr == 1].values
+    conf_auto = conf[nr == 0].values
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.8))
+    ax.hist(conf_review, bins=20, alpha=0.9, label="needs_review")
+    ax.hist(conf_auto, bins=20, alpha=0.9, label="auto_pass")
+    ax.set_title("Outcome Confidence Histogram (split by triage)")
+    ax.set_xlabel("Confidence")
+    ax.set_ylabel("Frequency")
+    ax.legend()
+    _finish_fig(os.path.join(OUTDIR, "confidence_hist_by_triage.png"))
+
+
+def model_comparison_from_metrics(label: str = "coarse") -> None:
+    """
+    Model comparison charts from metrics JSON produced by analysis/model.py.
+
     Looks for:
       - metrics_baseline_most_frequent_{label}.json
       - metrics_logreg_{label}.json
@@ -350,15 +413,17 @@ def model_comparison_from_metrics(label: str = "coarse"):
     for name, path in expected:
         if not os.path.exists(path):
             continue
-        j = _read_metrics_json(path)
+        j = _read_json(path)
         if not j:
             continue
-        rows.append({
-            "model": name,
-            "accuracy": float(j.get("accuracy", 0.0)),
-            "f1_macro": float(j.get("f1_macro", 0.0)),
-            "f1_weighted": float(j.get("f1_weighted", 0.0)),
-        })
+        rows.append(
+            {
+                "model": name,
+                "accuracy": float(j.get("accuracy", 0.0)),
+                "f1_macro": float(j.get("f1_macro", 0.0)),
+                "f1_weighted": float(j.get("f1_weighted", 0.0)),
+            }
+        )
 
     if not rows:
         logger.warning("Model comparison: no metrics JSON files found for label=%s; skipping.", label)
@@ -366,7 +431,7 @@ def model_comparison_from_metrics(label: str = "coarse"):
 
     mdf = pd.DataFrame(rows).set_index("model").sort_values("f1_macro", ascending=True)
 
-    # Plot macro-F1 (best for imbalance) + accuracy side-by-side as separate charts (clearer)
+    # Macro-F1 chart
     fig, ax = plt.subplots(figsize=(8.5, 4.8))
     ax.barh(mdf.index, mdf["f1_macro"].values)
     ax.set_title(f"Model Comparison ({label}) — Macro F1")
@@ -376,6 +441,7 @@ def model_comparison_from_metrics(label: str = "coarse"):
         ax.annotate(f"{v:.3f}", (v, i), textcoords="offset points", xytext=(6, -2), va="center", fontsize=9)
     _finish_fig(os.path.join(OUTDIR, f"model_comparison_f1_macro_{label}.png"))
 
+    # Accuracy chart
     fig, ax = plt.subplots(figsize=(8.5, 4.8))
     ax.barh(mdf.index, mdf["accuracy"].values)
     ax.set_title(f"Model Comparison ({label}) — Accuracy")
@@ -386,62 +452,16 @@ def model_comparison_from_metrics(label: str = "coarse"):
     _finish_fig(os.path.join(OUTDIR, f"model_comparison_accuracy_{label}.png"))
 
 
-def review_queue_overview(df: pd.DataFrame):
-    """
-    Visualize the human-in-the-loop triage:
-      - % flagged for review
-      - confidence histogram split by needs_review
-    """
-    needed = {"needs_review", "outcome_confidence"}
-    if not needed.issubset(set(df.columns)):
-        logger.warning("Review queue overview: missing %s; skipping.", ", ".join(sorted(needed - set(df.columns))))
-        return
-
-    _ensure_outdir()
-
-    nr = pd.to_numeric(df["needs_review"], errors="coerce").fillna(1).astype(int)
-    conf = pd.to_numeric(df["outcome_confidence"], errors="coerce").fillna(0.0).astype(float)
-
-    pct_review = float((nr == 1).mean() * 100.0)
-
-    # 1) simple bar: review vs auto
-    counts = pd.Series({
-        "auto_pass": int((nr == 0).sum()),
-        "needs_review": int((nr == 1).sum()),
-    })
-
-    fig, ax = plt.subplots(figsize=(7.5, 4.8))
-    bars = ax.bar(counts.index, counts.values)
-    ax.set_title(f"Review Queue Overview — {pct_review:.1f}% flagged")
-    ax.set_xlabel("Bucket")
-    ax.set_ylabel("Count")
-    for b, v in zip(bars, counts.values):
-        ax.annotate(str(v), xy=(b.get_x() + b.get_width() / 2, b.get_height()),
-                    xytext=(0, 4), textcoords="offset points",
-                    ha="center", va="bottom", fontsize=9)
-    _finish_fig(os.path.join(OUTDIR, "review_queue_overview.png"))
-
-    # 2) confidence hist split
-    conf_review = conf[nr == 1].values
-    conf_auto = conf[nr == 0].values
-
-    fig, ax = plt.subplots(figsize=(8.5, 4.8))
-    ax.hist(conf_review, bins=20, alpha=0.9, label="needs_review")
-    ax.hist(conf_auto, bins=20, alpha=0.9, label="auto_pass")
-    ax.set_title("Outcome Confidence Histogram (split by triage)")
-    ax.set_xlabel("Confidence")
-    ax.set_ylabel("Frequency")
-    ax.legend()
-    _finish_fig(os.path.join(OUTDIR, "confidence_hist_by_triage.png"))
-
-
 # -----------------------------------------------------------------------------
 # Runner
 # -----------------------------------------------------------------------------
-def generate_visualizations(df: pd.DataFrame):
+def generate_visualizations(df: pd.DataFrame) -> None:
+    """
+    Run all chart functions and save PNGs to data/outputs.
+    """
     _ensure_outdir()
     try:
-        # Existing charts (now with correct labels)
+        # Existing charts
         outcome_distribution(df)
         top_outcomes_overall(df)
         cases_by_court_stacked(df, top_n=12)
@@ -450,10 +470,10 @@ def generate_visualizations(df: pd.DataFrame):
         text_wordcount_hist(df, max_bin=5000)
         wordcount_by_outcome_box(df, max_cap=10000)
 
-        # CHANGE: tool-feel charts
+        # Tool-grade additions
         review_queue_overview(df)
         model_comparison_from_metrics(label="coarse")
-        # Optional: if you also run fine training successfully, this will render too.
+        # fine chart will render if fine metrics exist (safe to call)
         model_comparison_from_metrics(label="fine")
 
         logger.info("Saved visualizations to %s", OUTDIR)

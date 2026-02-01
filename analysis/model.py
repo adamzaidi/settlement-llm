@@ -1,14 +1,16 @@
 # analysis/model.py
 # -----------------------------------------------------------------------------
-# I build a minimal feature set, train two baseline classifiers, and always
-# write evaluation artifacts (even if training is skipped).
+# Purpose
+# - Build a small feature set, train baseline classifiers, and ALWAYS write
+#   evaluation artifacts (even if training is skipped).
 #
-# CHANGE (tool-grade upgrades):
-# - Fix label names to match your actual transform codes (coarse/fine).
-# - Save a label mapping artifact so outputs are interpretable without reading code.
-# - Add a simple baseline (majority class) for honest context.
-# - Add macro-F1 + weighted-F1 + accuracy to JSON/CSV metrics.
-# - Make label order stable (always 0..max_code) so confusion matrices align.
+# Tool-grade upgrades baked in:
+# - Label names match your transform codes (coarse/fine).
+# - Save label mapping artifacts so outputs are interpretable without reading code.
+# - Add a baseline (majority class) for honest context.
+# - Add macro-F1 + weighted-F1 + accuracy to JSON metrics + evaluation_summary.json.
+# - Make label order stable (0..max_code) so confusion matrices align across runs.
+# - Add a slightly richer (still lightweight) feature set beyond court-only.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import json
 import logging
 from typing import Tuple, Optional, Dict, Any, List
 
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
@@ -27,7 +30,7 @@ from sklearn.dummy import DummyClassifier
 
 logger = logging.getLogger("pipeline")
 
-# Output locations for evaluation artifacts
+# Output locations
 EVAL_DIR = "data/model-eval"
 EVAL_SUMMARY = os.path.join(EVAL_DIR, "evaluation_summary.json")
 
@@ -41,7 +44,7 @@ def _ensure_eval_dir() -> None:
 
 def _save_json(obj: dict, path: str) -> None:
     _ensure_eval_dir()
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
 
 
@@ -53,7 +56,7 @@ def _append_summary(entry: dict) -> None:
     _ensure_eval_dir()
     if os.path.exists(EVAL_SUMMARY):
         try:
-            with open(EVAL_SUMMARY, "r") as f:
+            with open(EVAL_SUMMARY, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
             data = {}
@@ -80,26 +83,33 @@ def _safe_int(v) -> int:
         return 0
 
 
-def _stable_label_list(df: pd.DataFrame, y_col: str, label: str) -> List[int]:
+def _stable_label_list(label: str) -> List[int]:
     """
-    CHANGE: ensure confusion matrices have stable axes across runs.
-    If the data doesn't contain all codes, we still keep the expected range.
+    Ensure confusion matrices and reports have stable axes across runs.
+    Your transform uses:
+      - coarse: 0..2
+      - fine:   0..5
     """
-    if label == "fine":
-        # transform.py uses 0..5 for fine (other, affirmed, reversed, vacated, remanded, dismissed)
-        return list(range(0, 6))
-    # coarse uses 0..2
-    return list(range(0, 3))
+    return list(range(0, 6)) if label == "fine" else list(range(0, 3))
 
 
-def _infer_code_to_name(df: pd.DataFrame, y_col: str, label: str) -> Dict[int, str]:
+def _code_to_name(label: str) -> Dict[int, str]:
     """
-    CHANGE: derive human-readable names that match YOUR codes.
-    - coarse: outcome_code (0 other/unknown, 1 affirmed/dismissed, 2 changed (reversed/vacated/remanded/mixed))
-    - fine: outcome_code_fine (0 other, 1 affirmed, 2 reversed, 3 vacated, 4 remanded, 5 dismissed)
+    Human-readable names matching YOUR codes (from transform.py semantics):
+      - coarse outcome_code:
+          0 other/unclear
+          1 affirmed_or_dismissed
+          2 changed_or_mixed (reversed/vacated/remanded/mixed)
+      - fine outcome_code_fine:
+          0 other
+          1 affirmed
+          2 reversed
+          3 vacated
+          4 remanded
+          5 dismissed
     """
     if label == "fine":
-        default = {
+        return {
             0: "other",
             1: "affirmed",
             2: "reversed",
@@ -107,22 +117,17 @@ def _infer_code_to_name(df: pd.DataFrame, y_col: str, label: str) -> Dict[int, s
             4: "remanded",
             5: "dismissed",
         }
-        return default
-
-    # coarse
-    default = {
+    return {
         0: "other",
         1: "affirmed_or_dismissed",
         2: "changed_or_mixed",
     }
-    return default
 
 
 def _save_label_mapping(label: str, y_col: str, mapping: Dict[int, str]) -> None:
     """
-    CHANGE: save an explicit mapping artifact so graders can interpret codes.
+    Save an explicit mapping artifact so readers can interpret codes.
     """
-    _ensure_eval_dir()
     out = {
         "label": label,
         "y_col": y_col,
@@ -133,7 +138,7 @@ def _save_label_mapping(label: str, y_col: str, mapping: Dict[int, str]) -> None
 
 def _metrics_row(y_true, y_pred) -> Dict[str, float]:
     """
-    CHANGE: include macro-F1 + weighted-F1.
+    Include accuracy + macro-F1 + weighted-F1 (more honest for imbalance).
     """
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
@@ -143,9 +148,47 @@ def _metrics_row(y_true, y_pred) -> Dict[str, float]:
 
 
 def _save_metrics_json(label: str, model_name: str, y_col: str, metrics: Dict[str, Any]) -> None:
-    _ensure_eval_dir()
     path = os.path.join(EVAL_DIR, f"metrics_{model_name}_{label}.json")
     _save_json({"label": label, "model": model_name, "y_col": y_col, **metrics}, path)
+
+
+def _build_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lightweight feature set:
+      - court (one-hot)
+      - opinion_year (numeric)
+      - text_word_count bucket (categorical)
+      - triage signals (numeric), if present
+    Keeps things simple + resume-credible without embeddings.
+    """
+    feat = pd.DataFrame(index=df.index)
+
+    # categorical
+    feat["court"] = df.get("court").fillna("Unknown")
+
+    # numeric year
+    feat["opinion_year"] = pd.to_numeric(df.get("opinion_year"), errors="coerce").fillna(0).astype(int)
+
+    # wordcount bucket (categorical)
+    wc = pd.to_numeric(df.get("text_word_count"), errors="coerce").fillna(0)
+    feat["wordcount_bucket"] = pd.cut(
+        wc,
+        bins=[-1, 300, 800, 1500, 3000, 10_000_000],
+        labels=["<=300", "301-800", "801-1500", "1501-3000", "3001+"],
+    ).astype(str)
+
+    # triage signals (if missing, default 0)
+    feat["disposition_zone_found"] = pd.to_numeric(df.get("disposition_zone_found"), errors="coerce").fillna(0).astype(int)
+    feat["strong_phrase"] = pd.to_numeric(df.get("evidence_contains_strong_phrase"), errors="coerce").fillna(0).astype(int)
+    feat["evidence_pos"] = pd.to_numeric(df.get("evidence_match_position"), errors="coerce").fillna(0.0).astype(float)
+
+    # one-hot categorical columns
+    X = pd.get_dummies(feat, columns=["court", "wordcount_bucket"], dummy_na=False)
+
+    # safety: ensure no inf/nan
+    X = X.replace([np.inf, -np.inf], 0).fillna(0)
+
+    return X
 
 
 # -----------------------------------------------------------------------------
@@ -153,10 +196,10 @@ def _save_metrics_json(label: str, model_name: str, y_col: str, metrics: Dict[st
 # -----------------------------------------------------------------------------
 def run_models(df: pd.DataFrame, label: str = "coarse") -> Tuple[Optional[LogisticRegression], Optional[RandomForestClassifier]]:
     """
-    Train and evaluate two baseline classifiers over the selected label set.
+    Train and evaluate baselines over the selected label set.
 
-    label='coarse' -> df['outcome_code'] (0 other, 1 affirmed/dismissed, 2 changed/mixed)
-    label='fine'   -> df['outcome_code_fine'] (0 other, 1 affirmed, 2 reversed, 3 vacated, 4 remanded, 5 dismissed)
+    label='coarse' -> df['outcome_code']
+    label='fine'   -> df['outcome_code_fine']
 
     Always writes artifacts under data/model-eval/:
       - classification reports (CSV)
@@ -175,21 +218,19 @@ def run_models(df: pd.DataFrame, label: str = "coarse") -> Tuple[Optional[Logist
     if y_col not in df.columns:
         raise ValueError(f"Expected target column '{y_col}' not found in processed DataFrame.")
 
-    # CHANGE: proper label names + saved mapping
-    code_to_name = _infer_code_to_name(df, y_col, label)
-    _save_label_mapping(label, y_col, code_to_name)
+    # Label mapping + stable label axis
+    mapping = _code_to_name(label)
+    labels_sorted = _stable_label_list(label)
+    names_sorted = [mapping.get(i, str(i)) for i in labels_sorted]
+    _save_label_mapping(label, y_col, mapping)
 
-    # Minimal, deterministic features: one-hot encode 'court'
-    X = pd.get_dummies(df[["court"]].fillna("Unknown"), dummy_na=False)
+    # Features
+    X = _build_features(df)
 
-    # Force y to int-ish where possible (your transform already does this)
+    # Target as int
     y = pd.to_numeric(df[y_col], errors="coerce").fillna(0).astype(int)
 
-    # Stable label list (even if some classes are absent)
-    labels_sorted = _stable_label_list(df, y_col, label)
-    names_sorted = [code_to_name.get(i, str(i)) for i in labels_sorted]
-
-    # If there's only one class present, skip training but still record an artifact.
+    # If only one class present, skip training but still write artifacts
     if y.nunique() < 2:
         msg = f"Only one class present in {y_col}: skipping model training."
         logger.warning(msg)
@@ -208,12 +249,12 @@ def run_models(df: pd.DataFrame, label: str = "coarse") -> Tuple[Optional[Logist
         _save_metrics_json(label, "both_skipped", y_col, entry)
         return None, None
 
-    # Standard train/test split. Stratify on y to preserve class balance.
+    # Split
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.3, random_state=42, stratify=y
     )
 
-    # CHANGE: baseline majority-class model (important for credibility)
+    # Baseline: majority class (most_frequent)
     baseline = DummyClassifier(strategy="most_frequent")
     baseline.fit(X_train, y_train)
     preds_base = baseline.predict(X_test)
@@ -223,7 +264,7 @@ def run_models(df: pd.DataFrame, label: str = "coarse") -> Tuple[Optional[Logist
         **base_metrics,
         "n_test": int(len(y_test)),
         "labels": labels_sorted,
-        "label_names": names_sorted
+        "label_names": names_sorted,
     })
     _append_summary({
         "status": "ok",
@@ -233,10 +274,10 @@ def run_models(df: pd.DataFrame, label: str = "coarse") -> Tuple[Optional[Logist
         "n_test": int(len(y_test)),
         "labels": labels_sorted,
         "label_names": names_sorted,
-        **base_metrics
+        **base_metrics,
     })
 
-    # Baseline models with class_weight='balanced' to hedge against imbalance.
+    # Models (balanced to hedge imbalance)
     log_model = LogisticRegression(max_iter=1500, class_weight="balanced")
     rf_model = RandomForestClassifier(
         random_state=42,
@@ -252,48 +293,54 @@ def run_models(df: pd.DataFrame, label: str = "coarse") -> Tuple[Optional[Logist
     preds_log = log_model.predict(X_test)
     preds_rf = rf_model.predict(X_test)
 
-    # Build reports (keep stable label order)
+    # Reports with stable label order
     rep_log = classification_report(
-        y_test, preds_log, labels=labels_sorted, target_names=names_sorted,
-        zero_division=0, output_dict=True
+        y_test, preds_log,
+        labels=labels_sorted,
+        target_names=names_sorted,
+        zero_division=0,
+        output_dict=True,
     )
     rep_rf = classification_report(
-        y_test, preds_rf, labels=labels_sorted, target_names=names_sorted,
-        zero_division=0, output_dict=True
+        y_test, preds_rf,
+        labels=labels_sorted,
+        target_names=names_sorted,
+        zero_division=0,
+        output_dict=True,
     )
 
-    # Persist reports + confusion matrices
     _save_report_dict(rep_log, f"{EVAL_DIR}/classification_report_logreg_{label}.csv")
     _save_report_dict(rep_rf,  f"{EVAL_DIR}/classification_report_rf_{label}.csv")
 
+    # Confusion matrices with stable axes
     cm_log = confusion_matrix(y_test, preds_log, labels=labels_sorted)
     cm_rf  = confusion_matrix(y_test, preds_rf,  labels=labels_sorted)
 
     pd.DataFrame(cm_log, index=names_sorted, columns=names_sorted).to_csv(f"{EVAL_DIR}/confusion_logreg_{label}.csv")
     pd.DataFrame(cm_rf,  index=names_sorted, columns=names_sorted).to_csv(f"{EVAL_DIR}/confusion_rf_{label}.csv")
 
-    # CHANGE: metrics that actually matter for imbalanced classes
+    # Metrics
     log_metrics = _metrics_row(y_test, preds_log)
     rf_metrics  = _metrics_row(y_test, preds_rf)
 
-    logger.info("LogReg metrics (%s): acc=%.4f f1_macro=%.4f", label, log_metrics["accuracy"], log_metrics["f1_macro"])
-    logger.info("RF metrics (%s):     acc=%.4f f1_macro=%.4f", label, rf_metrics["accuracy"], rf_metrics["f1_macro"])
-    logger.info("Baseline (%s):       acc=%.4f f1_macro=%.4f", label, base_metrics["accuracy"], base_metrics["f1_macro"])
+    logger.info("LogReg metrics (%s): acc=%.4f f1_macro=%.4f f1_w=%.4f", label, log_metrics["accuracy"], log_metrics["f1_macro"], log_metrics["f1_weighted"])
+    logger.info("RF metrics (%s):     acc=%.4f f1_macro=%.4f f1_w=%.4f", label, rf_metrics["accuracy"], rf_metrics["f1_macro"], rf_metrics["f1_weighted"])
+    logger.info("Baseline (%s):       acc=%.4f f1_macro=%.4f f1_w=%.4f", label, base_metrics["accuracy"], base_metrics["f1_macro"], base_metrics["f1_weighted"])
 
     _save_metrics_json(label, "logreg", y_col, {
         **log_metrics,
         "n_test": int(len(y_test)),
         "labels": labels_sorted,
-        "label_names": names_sorted
+        "label_names": names_sorted,
     })
     _save_metrics_json(label, "random_forest", y_col, {
         **rf_metrics,
         "n_test": int(len(y_test)),
         "labels": labels_sorted,
-        "label_names": names_sorted
+        "label_names": names_sorted,
     })
 
-    # Record in cumulative summary JSON
+    # Summary JSON
     _append_summary({
         "status": "ok",
         "label": label,
@@ -302,7 +349,7 @@ def run_models(df: pd.DataFrame, label: str = "coarse") -> Tuple[Optional[Logist
         "n_test": int(len(y_test)),
         "labels": labels_sorted,
         "label_names": names_sorted,
-        **log_metrics
+        **log_metrics,
     })
     _append_summary({
         "status": "ok",
@@ -312,7 +359,7 @@ def run_models(df: pd.DataFrame, label: str = "coarse") -> Tuple[Optional[Logist
         "n_test": int(len(y_test)),
         "labels": labels_sorted,
         "label_names": names_sorted,
-        **rf_metrics
+        **rf_metrics,
     })
 
     return log_model, rf_model

@@ -28,6 +28,8 @@ import pandas as pd
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+logger = logging.getLogger("pipeline")
+
 # CONFIG
 DEFAULT_FAST_MODE = False  # fast by default: fewer text ops
 
@@ -44,12 +46,35 @@ try:
 except Exception:
     pass
 
+# -----------------------------------------------------------------------------
+# ENV DEFAULTS (used only when function args are not provided)
+# Precedence: CLI/caller args > env > code defaults
+# -----------------------------------------------------------------------------
+ENV_MAX_CASES = os.getenv("MAX_CASES", "1000")
+ENV_QUERY = os.getenv("QUERY", "corporation")
+ENV_FAST_MODE = os.getenv("FAST_MODE")     # optional: "true"/"false"/"1"/"0"
+ENV_PAGE_SIZE = os.getenv("PAGE_SIZE")     # optional: int string
+
+
+def _env_bool(val: Optional[str], default: bool) -> bool:
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "t"}
+
+
+def _env_int(val: Optional[str], default: int) -> int:
+    try:
+        return int(val) if val is not None else default
+    except Exception:
+        return default
+
+
 # Snippet controls
 TEXT_SNIPPET_CHARS = int(os.getenv("TEXT_SNIPPET_CHARS", "12000"))
 SNIPPET_FETCH_SLEEP = float(os.getenv("SNIPPET_FETCH_SLEEP", "0.10"))
 SNIPPET_FETCH_MAX = int(os.getenv("SNIPPET_FETCH_MAX", "450"))
 
-# CHANGE: prefer tail snippet for outcome labeling; keep head too for context/EDA
+# Prefer tail snippet for outcome labeling; keep head too for context/EDA
 TEXT_SNIPPET_HEAD_CHARS = int(os.getenv("TEXT_SNIPPET_HEAD_CHARS", str(TEXT_SNIPPET_CHARS)))
 TEXT_SNIPPET_TAIL_CHARS = int(os.getenv("TEXT_SNIPPET_TAIL_CHARS", str(TEXT_SNIPPET_CHARS)))
 
@@ -63,10 +88,10 @@ MAX_SEARCH_PAGES = int(os.getenv("MAX_SEARCH_PAGES", "0")) or None
 API_KEY = os.getenv("COURTLISTENER_API_KEY")
 EMAIL = os.getenv("COURTLISTENER_EMAIL")
 
-# CHANGE: persist snippet-text caching across runs (separate shelve so you can wipe independently)
+# Persist snippet-text caching across runs (separate shelve so you can wipe independently)
 SNIPPET_CACHE_FILE = os.getenv("SNIPPET_CACHE_FILE", "data/extracted/snippet_cache.db")
 
-# CHANGE: add head/tail snippet columns; keep text_snippet for backward compatibility
+# Output schema
 OUTPUT_COLUMNS = [
     "opinion_id", "opinion_api_url",
     "case_id", "date_created", "date_modified", "opinion_year", "page_count", "per_curiam", "type",
@@ -312,7 +337,7 @@ def _strip_html(s: str) -> str:
 
 
 def _sanitize_for_csv(s: str) -> str:
-    # CHANGE: keep CSV/Sheets sane (your sample showed multi-line snippet)
+    # Keep CSV/Sheets sane
     if not s:
         return ""
     s = re.sub(r"[\r\n\t]+", " ", s)
@@ -320,20 +345,19 @@ def _sanitize_for_csv(s: str) -> str:
     return s
 
 
-# CHANGE: central helper to compute (head, tail, default_text_snippet)
 def _build_head_tail_snippets(full_text: str) -> tuple[str, str, str]:
     """
     Returns:
       (text_snippet_head, text_snippet_tail, text_snippet_default)
 
-    Default is tail, because disposition/status language is typically in the last pages/paragraphs.
+    Default is tail, because disposition/status language is typically near the end.
     """
     if not full_text:
         return "", "", ""
     t = _sanitize_for_csv(full_text)
     head = t[:TEXT_SNIPPET_HEAD_CHARS] if TEXT_SNIPPET_HEAD_CHARS > 0 else ""
     tail = t[-TEXT_SNIPPET_TAIL_CHARS:] if TEXT_SNIPPET_TAIL_CHARS > 0 else ""
-    default = tail or head  # prefer tail; fallback to head if tail empty
+    default = tail or head
     return head, tail, default
 
 
@@ -341,9 +365,6 @@ def _fetch_text_snippet(session: requests.Session, url: str, logger: logging.Log
     """
     Fetch a snippet of text from a plain_text_url.
     Cached so repeated runs do not re-hit CourtListener.
-
-    NOTE: we still fetch the full TEXT_SNIPPET_CHARS slice here (like before),
-    then later split into head/tail for storage.
     """
     if not url or not url.startswith(("http://", "https://")):
         return ""
@@ -416,8 +437,8 @@ def _extract_opinion_id_from_search_hit(hit: Dict[str, Any]) -> Optional[int]:
 # MAIN
 # -----------------------------------------------------------------------------
 def extract_data(
-    query: str = "corporation",
-    max_cases: int = 1000,
+    query: Optional[str] = None,
+    max_cases: Optional[int] = None,
     debug_print_one: bool = False,
     *,
     fast_mode: Optional[bool] = None,
@@ -429,14 +450,28 @@ def extract_data(
     if not API_KEY or not EMAIL:
         raise RuntimeError("Set COURTLISTENER_API_KEY and COURTLISTENER_EMAIL in your environment or .env")
 
-    # Strict max_cases
+    # -------------------------------------------------------------------------
+    # Resolve runtime settings (args > env > defaults)
+    # -------------------------------------------------------------------------
+    query = (query or ENV_QUERY).strip() or "corporation"
+
+    # max_cases: arg beats env, env beats fallback
+    max_cases = max_cases if max_cases is not None else _env_int(ENV_MAX_CASES, 1000)
     try:
         max_cases = int(max_cases)
     except Exception:
         max_cases = 1000
     max_cases = max(1, max_cases)
 
-    FAST_MODE = DEFAULT_FAST_MODE if fast_mode is None else bool(fast_mode)
+    # fast_mode: explicit arg beats env; else env; else DEFAULT_FAST_MODE
+    if fast_mode is None:
+        fast_mode = _env_bool(ENV_FAST_MODE, DEFAULT_FAST_MODE)
+    FAST_MODE = bool(fast_mode)
+
+    # page_size: explicit arg beats env; else env; else based on FAST_MODE
+    if page_size is None:
+        page_size = _env_int(ENV_PAGE_SIZE, 100 if FAST_MODE else 50)
+    eff_page_size = int(page_size)
 
     headers = {"User-Agent": f"inst414-final-project ({EMAIL})", "Authorization": f"Token {API_KEY}"}
     session = requests.Session()
@@ -455,11 +490,14 @@ def extract_data(
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 
-    eff_page_size = page_size if page_size is not None else (100 if FAST_MODE else 50)
     params = {"q": query, "type": "o", "page_size": eff_page_size}
     logger.info(
-        "Searching opinions from CourtListener /search/… (page_size=%s, max_cases=%s, max_pages=%s)",
-        eff_page_size, max_cases, MAX_SEARCH_PAGES if MAX_SEARCH_PAGES is not None else "None"
+        "Searching opinions from CourtListener /search/… (q=%r, page_size=%s, max_cases=%s, max_pages=%s, fast_mode=%s)",
+        query,
+        eff_page_size,
+        max_cases,
+        MAX_SEARCH_PAGES if MAX_SEARCH_PAGES is not None else "None",
+        FAST_MODE,
     )
 
     os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
@@ -483,7 +521,6 @@ def extract_data(
     docket_cache: Dict[str, Dict[str, Any]] = {}
     rows: List[Dict[str, Any]] = []
 
-    # dedupe at the extractor level to avoid refetching the same opinion
     seen_opinion_ids: set[int] = set()
 
     url = SEARCH_URL
@@ -549,8 +586,7 @@ def extract_data(
                     printed_debug = True
                     return pd.DataFrame()
 
-                # NOTE: CourtListener opinion object's "id" is the opinion id.
-                case_id = op.get("id")  # "case_id" here is opinion-level id in your current dataset
+                case_id = op.get("id")  # opinion-level id in this dataset
 
                 date_created = op.get("date_created", "")
                 date_modified = op.get("date_modified", "")
@@ -568,16 +604,13 @@ def extract_data(
                 m = re.match(r"^(\d{4})-", date_created or "")
                 opinion_year = int(m.group(1)) if m else None
 
-                # --- TEXT: robust, fast-first strategy ---
                 raw_plain = op.get("plain_text") or ""
                 plain_text_url, plain_text_inline = _split_plain_text(raw_plain)
-
                 plain_text_present = int(bool(plain_text_url or plain_text_inline))
 
-                # CHANGE: store head/tail; default snippet is tail
                 text_snippet_head = ""
                 text_snippet_tail = ""
-                text_snippet = ""  # default used by transform
+                text_snippet = ""
 
                 if not FAST_MODE:
                     full_text_for_snippets = ""
@@ -594,10 +627,8 @@ def extract_data(
                         if isinstance(raw_html, str) and raw_html.strip():
                             full_text_for_snippets = _strip_html(raw_html)
 
-                    # Build head/tail + default snippet (tail) from whatever text we got
                     text_snippet_head, text_snippet_tail, text_snippet = _build_head_tail_snippets(full_text_for_snippets)
 
-                # Cluster enrichment
                 cluster: Dict[str, Any] = {}
                 if cluster_url:
                     ckey = _normalize_url(cluster_url)
@@ -620,7 +651,6 @@ def extract_data(
                 citation = _pick_citation(all_citations) or "Unknown"
                 has_citation = int(citation != "Unknown")
 
-                # Court resolution
                 court_name = ""
                 court_url = ""
 
@@ -723,12 +753,9 @@ def extract_data(
                     "label_heuristic": label_heuristic,
                     "plain_text_present": plain_text_present,
                     "plain_text_url": plain_text_url,
-
-                    # CHANGE: new head/tail fields + default snippet (tail)
                     "text_snippet_head": text_snippet_head,
                     "text_snippet_tail": text_snippet_tail,
                     "text_snippet": text_snippet,
-
                     "download_url": download_url or "",
                     "cluster_url": cluster_url or "",
                     "court_url": court_url or "",
@@ -760,7 +787,6 @@ def extract_data(
 
         df = pd.DataFrame(rows)
 
-        # final dedupe safety
         if "opinion_id" in df.columns:
             before = len(df)
             df = df.drop_duplicates(subset=["opinion_id"], keep="first")
@@ -787,4 +813,5 @@ def extract_data(
 
 
 if __name__ == "__main__":
-    extract_data(query="corporation", max_cases=200, fast_mode=False, page_size=50)
+    # IMPORTANT: do NOT override env defaults here
+    extract_data()

@@ -6,6 +6,10 @@
 # 4) Generate visualizations.
 #
 # CHANGE: adds a real CLI with subcommands + run artifact packaging
+# CHANGE (env-first ergonomics):
+# - CLI args default to .env when present (QUERY, MAX_CASES, FAST_MODE, PAGE_SIZE, MAX_SEARCH_PAGES)
+# - Precedence: CLI flags > env > code defaults
+# - Passing --max-pages 0 clears any env cap (sets MAX_SEARCH_PAGES=0)
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -41,6 +45,36 @@ try:
     from utils.validators import validate_processed
 except Exception:
     validate_processed = None
+
+
+# -----------------------------------------------------------------------------
+# .env defaults (only used if CLI does not provide values)
+# -----------------------------------------------------------------------------
+ENV_QUERY = os.getenv("QUERY")  # default inside extract.py is "corporation"
+ENV_MAX_CASES = os.getenv("MAX_CASES")
+ENV_FAST_MODE = os.getenv("FAST_MODE")  # "true"/"false"/"1"/"0"
+ENV_PAGE_SIZE = os.getenv("PAGE_SIZE")
+ENV_MAX_SEARCH_PAGES = os.getenv("MAX_SEARCH_PAGES")  # "0" means no cap
+
+
+def _env_bool(val: Optional[str], default: Optional[bool] = None) -> Optional[bool]:
+    if val is None:
+        return default
+    s = str(val).strip().lower()
+    if s in {"1", "true", "yes", "y", "t"}:
+        return True
+    if s in {"0", "false", "no", "n", "f"}:
+        return False
+    return default
+
+
+def _env_int(val: Optional[str], default: Optional[int] = None) -> Optional[int]:
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except Exception:
+        return default
 
 
 # -----------------------------------------------------------------------------
@@ -85,7 +119,6 @@ def _copy_if_exists(src: str | Path, dst: str | Path, logger: logging.Logger) ->
     _ensure_dir(dstp.parent)
     try:
         if srcp.is_dir():
-            # Python 3.11+: dirs_exist_ok supported
             shutil.copytree(srcp, dstp, dirs_exist_ok=True)
         else:
             shutil.copy2(srcp, dstp)
@@ -96,25 +129,21 @@ def _copy_if_exists(src: str | Path, dst: str | Path, logger: logging.Logger) ->
 
 def _package_run_artifacts(ctx, logger: logging.Logger) -> None:
     """
-    CHANGE: copy key outputs into runs/<run_id>/artifacts so a run is self-contained.
+    Copy key outputs into runs/<run_id>/artifacts so a run is self-contained.
     """
     artifacts_dir = Path(ctx.run_dir) / "artifacts"
     _ensure_dir(artifacts_dir)
 
-    # Core data outputs
     _copy_if_exists("data/extracted/raw_data.csv", artifacts_dir / "raw_data.csv", logger)
     _copy_if_exists("data/extracted/raw_data_partial.csv", artifacts_dir / "raw_data_partial.csv", logger)
     _copy_if_exists("data/processed/processed_data.csv", artifacts_dir / "processed_data.csv", logger)
     _copy_if_exists("data/processed/review_queue.csv", artifacts_dir / "review_queue.csv", logger)
 
-    # Visualizations + evaluation
     _copy_if_exists("data/outputs", artifacts_dir / "outputs", logger)
     _copy_if_exists("data/model-eval", artifacts_dir / "model-eval", logger)
 
-    # Logs
     _copy_if_exists("logs/pipeline.log", Path(ctx.run_dir) / "logs" / "pipeline.log", logger)
 
-    # Quick run summary
     summary = {
         "run_id": getattr(ctx, "run_id", None),
         "run_dir": str(getattr(ctx, "run_dir", "")),
@@ -139,7 +168,7 @@ def _package_run_artifacts(ctx, logger: logging.Logger) -> None:
 # -----------------------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
     """
-    CHANGE: 'tool feel' CLI. Subcommands are easy to demo and resume-friendly.
+    Tool-feel CLI. Defaults flow from .env unless flags are provided.
     """
     p = argparse.ArgumentParser(
         prog="inst414-pipeline",
@@ -147,56 +176,71 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Shared args
     def add_common_run_args(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("--query", default="corporation", help="Keyword query passed to CourtListener /search/?q=...")
-        sp.add_argument("--max-cases", type=int, default=1000, help="Hard cap on number of opinions extracted")
-        sp.add_argument("--max-pages", type=int, default=0, help="Hard cap on /search/ pages (0 = no cap)")
-        sp.add_argument("--fast-mode", action="store_true", help="Fast mode (less text processing)")
-        sp.add_argument("--page-size", type=int, default=0, help="Search page_size override (0 uses default)")
+        # NOTE: default=None so extract.py can use env defaults when not provided.
+        sp.add_argument("--query", default=ENV_QUERY, help="Keyword query. Defaults to env QUERY if set.")
+        sp.add_argument(
+            "--max-cases",
+            type=int,
+            default=_env_int(ENV_MAX_CASES, None),
+            help="Hard cap on number of opinions extracted. Defaults to env MAX_CASES if set.",
+        )
+        sp.add_argument(
+            "--max-pages",
+            type=int,
+            default=_env_int(ENV_MAX_SEARCH_PAGES, None),
+            help="Hard cap on /search/ pages. 0 = no cap. Defaults to env MAX_SEARCH_PAGES if set.",
+        )
+        # BooleanOptionalAction gives you --fast-mode / --no-fast-mode (nice)
+        sp.add_argument(
+            "--fast-mode",
+            action=argparse.BooleanOptionalAction,
+            default=_env_bool(ENV_FAST_MODE, None),
+            help="Fast mode. Defaults to env FAST_MODE if set.",
+        )
+        sp.add_argument(
+            "--page-size",
+            type=int,
+            default=_env_int(ENV_PAGE_SIZE, None),
+            help="Search page_size override. Defaults to env PAGE_SIZE if set.",
+        )
         sp.add_argument("--no-viz", action="store_true", help="Skip visualization generation")
         sp.add_argument("--no-models", action="store_true", help="Skip model training/eval")
         sp.add_argument("--label", choices=["coarse", "fine", "both"], default="both", help="Which labels to model")
 
-    # run (full pipeline)
     sp_run = sub.add_parser("run", help="Run the full pipeline end-to-end")
     add_common_run_args(sp_run)
 
-    # extract only
     sp_ex = sub.add_parser("extract", help="Run extract step only")
-    sp_ex.add_argument("--query", default="corporation")
-    sp_ex.add_argument("--max-cases", type=int, default=1000)
-    sp_ex.add_argument("--max-pages", type=int, default=0)
-    sp_ex.add_argument("--fast-mode", action="store_true")
-    sp_ex.add_argument("--page-size", type=int, default=0)
+    sp_ex.add_argument("--query", default=ENV_QUERY)
+    sp_ex.add_argument("--max-cases", type=int, default=_env_int(ENV_MAX_CASES, None))
+    sp_ex.add_argument("--max-pages", type=int, default=_env_int(ENV_MAX_SEARCH_PAGES, None))
+    sp_ex.add_argument("--fast-mode", action=argparse.BooleanOptionalAction, default=_env_bool(ENV_FAST_MODE, None))
+    sp_ex.add_argument("--page-size", type=int, default=_env_int(ENV_PAGE_SIZE, None))
 
-    # transform only
     sub.add_parser("transform", help="Run transform step only (reads data/extracted/raw_data.csv)")
-
-    # load only
     sub.add_parser("load", help="Run load step only (reads data/processed/processed_data.csv)")
 
-    # model only
     sp_m = sub.add_parser("model", help="Run model training/eval only")
     sp_m.add_argument("--label", choices=["coarse", "fine"], default="coarse")
 
-    # viz only
     sub.add_parser("viz", help="Generate visualizations only")
-
-    # doctor
     sub.add_parser("doctor", help="Quick health check: verify expected files/dirs exist")
 
     return p
 
 
-def _apply_runtime_env(max_pages: int, logger: logging.Logger) -> None:
+def _apply_runtime_env(max_pages: Optional[int], logger: logging.Logger) -> None:
     """
-    CHANGE: let CLI control behavior without rewriting ETL code.
-    Your extractor already reads MAX_SEARCH_PAGES from env.
+    Let CLI control extractor behavior via env MAX_SEARCH_PAGES.
+    - If max_pages is None: do nothing (use whatever env/.env has)
+    - If max_pages is provided (including 0): set env explicitly
+      (0 clears any cap because extractor treats 0 -> None)
     """
-    if max_pages and max_pages > 0:
-        os.environ["MAX_SEARCH_PAGES"] = str(max_pages)
-        logger.info("Set env MAX_SEARCH_PAGES=%s", max_pages)
+    if max_pages is None:
+        return
+    os.environ["MAX_SEARCH_PAGES"] = str(max_pages)
+    logger.info("Set env MAX_SEARCH_PAGES=%s", max_pages)
 
 
 # -----------------------------------------------------------------------------
@@ -219,14 +263,13 @@ def cmd_doctor(logger: logging.Logger) -> int:
 
 
 def cmd_extract(args, logger: logging.Logger) -> None:
-    _apply_runtime_env(args.max_pages, logger)
+    _apply_runtime_env(getattr(args, "max_pages", None), logger)
 
-    page_size = args.page_size if getattr(args, "page_size", 0) else None
     extract_data(
-        query=args.query,
-        max_cases=args.max_cases,
-        fast_mode=bool(args.fast_mode),
-        page_size=page_size,
+        query=getattr(args, "query", None),
+        max_cases=getattr(args, "max_cases", None),
+        fast_mode=getattr(args, "fast_mode", None),
+        page_size=getattr(args, "page_size", None),
     )
 
 
@@ -249,7 +292,6 @@ def cmd_model(df, label: str, logger: logging.Logger) -> None:
     elif label == "fine":
         run_models(df, label="fine")
     else:
-        # should never happen because argparse validates
         run_models(df, label="coarse")
 
 
@@ -258,33 +300,25 @@ def cmd_viz(df, logger: logging.Logger) -> None:
 
 
 def run_pipeline_from_args(args, logger: logging.Logger, ctx) -> None:
-    """
-    CHANGE: pipeline now accepts CLI args so runs are reproducible + demo-able.
-    """
     logger.info("Pipeline start")
     logger.info("Args: %s", vars(args))
 
-    # Save run params inside runs/<run_id> (already do this, but now includes CLI)
     params = {"run_id": ctx.run_id, **vars(args)}
     ctx.save_json("params.json", params)
 
     try:
-        # STEP 1: Extract
         logger.info("Step 1: Extract data")
         cmd_extract(args, logger)
         logger.info("Extract complete")
 
-        # STEP 2: Transform
         logger.info("Step 2: Transform data")
         cmd_transform(logger)
         logger.info("Transform complete")
 
-        # STEP 3: Load (+ validate)
         logger.info("Step 3: Load processed data")
         df = cmd_load(logger)
         logger.info("Load complete: %d rows", len(df))
 
-        # STEP 4: Models
         if not getattr(args, "no_models", False):
             logger.info("Step 4: Model training & evaluation")
             if args.label in ("coarse", "both"):
@@ -298,7 +332,6 @@ def run_pipeline_from_args(args, logger: logging.Logger, ctx) -> None:
         else:
             logger.info("Skipping models (--no-models)")
 
-        # STEP 5: Visualizations
         if not getattr(args, "no_viz", False):
             logger.info("Step 5: Generate visualizations")
             cmd_viz(df, logger)
@@ -310,7 +343,6 @@ def run_pipeline_from_args(args, logger: logging.Logger, ctx) -> None:
         logger.exception("Pipeline failed: %s", e)
         raise
     finally:
-        # CHANGE: package artifacts even if something fails mid-run (best effort)
         try:
             _package_run_artifacts(ctx, logger)
         except Exception as e:
@@ -325,8 +357,6 @@ def run_pipeline_from_args(args, logger: logging.Logger, ctx) -> None:
 def main(argv: Optional[list[str]] = None) -> int:
     logger = _bootstrap_logging()
 
-    # CHANGE: unify run context logging with pipeline logger output
-    # (run_context already writes to runs/<run_id>/logs/run.log)
     ctx = init_run_context()
     configure_run_logging(ctx)
 
